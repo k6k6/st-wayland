@@ -200,10 +200,11 @@ treflow(int col, int row)
 	}
 	term.histf = -i - 1;
 	term.scr = MIN(term.scr, term.histf);
-	/* resize rest of the history lines */
+	/* the rest of the history holds no content: release it (lazy alloc) */
 	for (/*i = -term.histf - 1 */; i >= -HISTSIZE; i--) {
 		j = (term.histi + i + 1 + HISTSIZE) % HISTSIZE;
-		term.hist[j] = xrealloc(term.hist[j], col * sizeof(Glyph));
+		free(term.hist[j]);
+		term.hist[j] = NULL;
 	}
 
 	#if SIXEL_PATCH
@@ -386,6 +387,19 @@ tresizealt(int col, int row)
 	tfulldirt();
 }
 
+/* release all scrollback lines; caller resets histf/histi/scr */
+void
+tfreehist(void)
+{
+	int i;
+
+	for (i = 0; i < HISTSIZE; i++) {
+		free(term.hist[i]);
+		term.hist[i] = NULL;
+	}
+	malloc_trim(0); /* actually return the freed scrollback to the kernel */
+}
+
 void
 kscrolldown(const Arg* a)
 {
@@ -472,11 +486,16 @@ tscrollup(int top, int bot, int n, int mode)
 	n = MIN(n, bot-top+1);
 
 	if (savehist) {
+		/* one template glyph, whole-struct stores: vectorizable, unlike tclearglyph() per cell */
+		Glyph blank = { .u = ' ', .mode = ATTR_NULL,
+		                .fg = term.c.attr.fg, .bg = term.c.attr.bg };
 		for (i = 0; i < n; i++) {
 			term.histi = (term.histi + 1) % HISTSIZE;
 			temp = term.hist[term.histi];
+			if (!temp)
+				temp = xmalloc(term.col * sizeof(Glyph));
 			for (j = 0; j < term.col; j++)
-				tclearglyph(&temp[j], 1);
+				temp[j] = blank;
 			term.hist[term.histi] = term.line[i];
 			term.line[i] = temp;
 		}
@@ -494,10 +513,16 @@ tscrollup(int top, int bot, int n, int mode)
 		tsetdirt(top + scr, bot + scr);
 	}
 
-	for (i = top; i <= bot-n; i++) {
-		temp = term.line[i];
-		term.line[i] = term.line[i+n];
-		term.line[i+n] = temp;
+	/*
+	 * Rotate line[top..bot] left by n: the n lines at the top (now blank)
+	 * end up at the bottom. One memmove instead of a swap per row.
+	 */
+	if (n < bot - top + 1) {
+		Line saved[n];
+		memcpy(saved, &term.line[top], n * sizeof(Line));
+		memmove(&term.line[top], &term.line[top + n],
+		        (bot - top + 1 - n) * sizeof(Line));
+		memcpy(&term.line[bot - n + 1], saved, n * sizeof(Line));
 	}
 
 	#if SIXEL_PATCH
@@ -593,7 +618,7 @@ tresize(int col, int row)
 
 	#if KEYBOARDSELECT_PATCH
 	if (row != term.row || col != term.col)
-		win.mode ^= kbds_keyboardhandler(XK_Escape, NULL, 0, 1);
+		win.mode ^= kbds_keyboardhandler(XKB_KEY_Escape, NULL, 0, 1);
 	#endif // KEYBOARDSELECT_PATCH
 
 	term.dirty = xrealloc(term.dirty, row * sizeof(*term.dirty));
@@ -642,8 +667,9 @@ tnew(int col, int row)
 	}
 	term.dirty = xmalloc(row * sizeof(*term.dirty));
 	term.tabs = xmalloc(col * sizeof(*term.tabs));
+	/* scrollback lines are allocated lazily when content scrolls into them */
 	for (i = 0; i < HISTSIZE; i++)
-		term.hist[i] = xmalloc(col * sizeof(Glyph));
+		term.hist[i] = NULL;
 	treset();
 }
 

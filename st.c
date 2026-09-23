@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <malloc.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -20,11 +21,6 @@
 
 #include "st.h"
 #include "win.h"
-
-#if KEYBOARDSELECT_PATCH
-#include <X11/keysym.h>
-#include <X11/X.h>
-#endif // KEYBOARDSELECT_PATCH
 
 #if SIXEL_PATCH
 #include "sixel.h"
@@ -941,7 +937,7 @@ ttynew(const char *line, char *cmd, const char *out, char **args)
 size_t
 ttyread(void)
 {
-	static char buf[BUFSIZ];
+	static char buf[65536];
 	static int buflen = 0;
 	int ret, written;
 
@@ -1198,6 +1194,7 @@ treset(void)
 	memset(term.trantbl, CS_USA, sizeof(term.trantbl));
 	term.charset = 0;
 	#if REFLOW_PATCH
+	tfreehist();
 	term.histf = 0;
 	term.histi = 0;
 	term.scr = 0;
@@ -1772,10 +1769,7 @@ tsetattr(const int *attr, int l)
 			term.c.attr.fg = defaultfg;
 			term.c.attr.bg = defaultbg;
 			#if UNDERCURL_PATCH
-			term.c.attr.ustyle = -1;
-			term.c.attr.ucolor[0] = -1;
-			term.c.attr.ucolor[1] = -1;
-			term.c.attr.ucolor[2] = -1;
+			term.c.attr.ul = 0; /* style -1, no colour */
 			#endif // UNDERCURL_PATCH
 			break;
 		case 1:
@@ -1789,9 +1783,9 @@ tsetattr(const int *attr, int l)
 			break;
 		case 4:
 			#if UNDERCURL_PATCH
-			term.c.attr.ustyle = csiescseq.carg[i][0];
+			UL_SET_STYLE(term.c.attr.ul, csiescseq.carg[i][0]);
 
-			if (term.c.attr.ustyle != 0)
+			if (UL_STYLE(term.c.attr.ul) != 0)
 				term.c.attr.mode |= ATTR_UNDERLINE;
 			else
 				term.c.attr.mode &= ~ATTR_UNDERLINE;
@@ -1860,15 +1854,20 @@ tsetattr(const int *attr, int l)
 			break;
 		#if UNDERCURL_PATCH
 		case 58:
-			term.c.attr.ucolor[0] = csiescseq.carg[i][1];
-			term.c.attr.ucolor[1] = csiescseq.carg[i][2];
-			term.c.attr.ucolor[2] = csiescseq.carg[i][3];
+			/* 58:5:idx (index) or 58:2:r:g:b (rgb); missing args are -1 */
+			if (csiescseq.carg[i][2] < 0 && csiescseq.carg[i][1] >= 0)
+				UL_SET_COLOR(term.c.attr.ul, UC_INDEX, csiescseq.carg[i][1] & 0xff);
+			else if (csiescseq.carg[i][1] >= 0)
+				UL_SET_COLOR(term.c.attr.ul, UC_RGB,
+					(csiescseq.carg[i][1] & 0xff) << 16 |
+					(csiescseq.carg[i][2] & 0xff) << 8 |
+					(csiescseq.carg[i][3] & 0xff));
+			else
+				UL_SET_COLOR(term.c.attr.ul, UC_NONE, 0);
 			term.c.attr.mode ^= ATTR_DIRTYUNDERLINE;
 			break;
 		case 59:
-			term.c.attr.ucolor[0] = -1;
-			term.c.attr.ucolor[1] = -1;
-			term.c.attr.ucolor[2] = -1;
+			UL_SET_COLOR(term.c.attr.ul, UC_NONE, 0);
 			term.c.attr.mode ^= ATTR_DIRTYUNDERLINE;
 			break;
 		#else
@@ -2288,6 +2287,7 @@ csihandle(void)
 			if (IS_SET(MODE_ALTSCREEN))
 				break;
 			kscrolldown(&((Arg){ .i = term.scr }));
+			tfreehist();
 			term.scr = 0;
 			term.histi = 0;
 			term.histf = 0;
@@ -3641,7 +3641,7 @@ tresize(int col, int row)
 
 	#if KEYBOARDSELECT_PATCH
 	if ( row < term.row  || col < term.col )
-		toggle_winmode(trt_kbdselect(XK_Escape, NULL, 0));
+		toggle_winmode(trt_kbdselect(XKB_KEY_Escape, NULL, 0));
 	#endif // KEYBOARDSELECT_PATCH
 
 	if (col < 1 || row < 1) {

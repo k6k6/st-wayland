@@ -53,6 +53,7 @@ void xsetsel(char *);
 int xstartdraw(void);
 void xximspot(int, int);
 void xclearwin(void);
+void wlsetpointer(int);
 #if REFLOW_PATCH && KEYBOARDSELECT_PATCH
 void xdrawglyph(Glyph, int, int);
 #endif // KEYBOARDSELECT_PATCH

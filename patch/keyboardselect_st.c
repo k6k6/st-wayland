@@ -105,26 +105,26 @@ int trt_kbdselect(KeySym ksym, char *buf, int len)
 	int i, bound, *xy;
 
 	if (selectsearch_mode & 2) {
-		if (ksym == XK_Return) {
+		if (ksym == XKB_KEY_Return) {
 			selectsearch_mode ^= 2;
 			set_notifmode(selectsearch_mode, -2);
-			if (ksym == XK_Escape)
+			if (ksym == XKB_KEY_Escape)
 				ptarget = 0;
 			return 0;
-		} else if (ksym == XK_BackSpace) {
+		} else if (ksym == XKB_KEY_BackSpace) {
 			if (!ptarget)
 				return 0;
 			term.line[term.bot][ptarget--].u = ' ';
 		} else if (len < 1) {
 			return 0;
-		} else if (ptarget == term.col || ksym == XK_Escape) {
+		} else if (ptarget == term.col || ksym == XKB_KEY_Escape) {
 			return 0;
 		} else {
 			utf8decode(buf, &target[ptarget++], len);
 			term.line[term.bot][ptarget].u = target[ptarget - 1];
 		}
 
-		if (ksym != XK_BackSpace)
+		if (ksym != XKB_KEY_BackSpace)
 			search(selectsearch_mode, &target[0], ptarget, sens, type, &cu);
 
 		term.dirty[term.bot] = 1;
@@ -138,85 +138,85 @@ int trt_kbdselect(KeySym ksym, char *buf, int len)
 		cu.x = term.c.x, cu.y = term.c.y;
 		set_notifmode(0, ksym);
 		return MODE_KBDSELECT;
-	case XK_s:
+	case XKB_KEY_s:
 		if (selectsearch_mode & 1)
 			selclear();
 		else
 			selstart(term.c.x, term.c.y, 0);
 		set_notifmode(selectsearch_mode ^= 1, ksym);
 		break;
-	case XK_t:
+	case XKB_KEY_t:
 		selextend(term.c.x, term.c.y, type ^= 3, i = 0);  /* 2 fois */
 		selextend(term.c.x, term.c.y, type, i = 0);
 		break;
-	case XK_slash:
-	case XK_KP_Divide:
-	case XK_question:
-		ksym &= XK_question;                /* Divide to slash */
-		sens = (ksym == XK_slash) ? -1 : 1;
+	case XKB_KEY_slash:
+	case XKB_KEY_KP_Divide:
+	case XKB_KEY_question:
+		ksym &= XKB_KEY_question;                /* Divide to slash */
+		sens = (ksym == XKB_KEY_slash) ? -1 : 1;
 		ptarget = 0;
 		set_notifmode(15, ksym);
 		selectsearch_mode ^= 2;
 		break;
-	case XK_Escape:
+	case XKB_KEY_Escape:
 		if (!in_use)
 			break;
 		selclear();
-	case XK_Return:
+	case XKB_KEY_Return:
 		set_notifmode(4, ksym);
 		term.c.x = cu.x, term.c.y = cu.y;
 		select_or_drawcursor(selectsearch_mode = 0, type);
 		in_use = quant = 0;
 		return MODE_KBDSELECT;
-	case XK_n:
-	case XK_N:
+	case XKB_KEY_n:
+	case XKB_KEY_N:
 		if (ptarget)
-			search(selectsearch_mode, &target[0], ptarget, (ksym == XK_n) ? -1 : 1, type, &cu);
+			search(selectsearch_mode, &target[0], ptarget, (ksym == XKB_KEY_n) ? -1 : 1, type, &cu);
 		break;
-	case XK_BackSpace:
+	case XKB_KEY_BackSpace:
 		term.c.x = 0;
 		select_or_drawcursor(selectsearch_mode, type);
 		break;
-	case XK_dollar:
+	case XKB_KEY_dollar:
 		term.c.x = term.col - 1;
 		select_or_drawcursor(selectsearch_mode, type);
 		break;
-	case XK_Home:
+	case XKB_KEY_Home:
 		term.c.x = 0, term.c.y = 0;
 		select_or_drawcursor(selectsearch_mode, type);
 		break;
-	case XK_End:
+	case XKB_KEY_End:
 		term.c.x = cu.x, term.c.y = cu.y;
 		select_or_drawcursor(selectsearch_mode, type);
 		break;
-	case XK_Page_Up:
-	case XK_Page_Down:
-		term.c.y = (ksym == XK_Prior ) ? 0 : cu.y;
+	case XKB_KEY_Page_Up:
+	case XKB_KEY_Page_Down:
+		term.c.y = (ksym == XKB_KEY_Prior ) ? 0 : cu.y;
 		select_or_drawcursor(selectsearch_mode, type);
 		break;
-	case XK_exclam:
+	case XKB_KEY_exclam:
 		term.c.x = term.col >> 1;
 		select_or_drawcursor(selectsearch_mode, type);
 		break;
-	case XK_asterisk:
-	case XK_KP_Multiply:
+	case XKB_KEY_asterisk:
+	case XKB_KEY_KP_Multiply:
 		term.c.x = term.col >> 1;
-	case XK_underscore:
+	case XKB_KEY_underscore:
 		term.c.y = cu.y >> 1;
 		select_or_drawcursor(selectsearch_mode, type);
 		break;
 	default:
-		if (ksym >= XK_0 && ksym <= XK_9) {                 /* 0-9 keyboard */
-			quant = (quant * 10) + (ksym ^ XK_0);
+		if (ksym >= XKB_KEY_0 && ksym <= XKB_KEY_9) {                 /* 0-9 keyboard */
+			quant = (quant * 10) + (ksym ^ XKB_KEY_0);
 			return 0;
-		} else if (ksym >= XK_KP_0 && ksym <= XK_KP_9) {    /* 0-9 numpad */
-			quant = (quant * 10) + (ksym ^ XK_KP_0);
+		} else if (ksym >= XKB_KEY_KP_0 && ksym <= XKB_KEY_KP_9) {    /* 0-9 numpad */
+			quant = (quant * 10) + (ksym ^ XKB_KEY_KP_0);
 			return 0;
-		} else if (ksym == XK_k || ksym == XK_h)
+		} else if (ksym == XKB_KEY_k || ksym == XKB_KEY_h)
 			i = ksym & 1;
-		else if (ksym == XK_l || ksym == XK_j)
+		else if (ksym == XKB_KEY_l || ksym == XKB_KEY_j)
 			i = ((ksym & 6) | 4) >> 1;
-		else if ((XK_Home & ksym) != XK_Home || (i = (ksym ^ XK_Home) - 1) > 3)
+		else if ((XKB_KEY_Home & ksym) != XKB_KEY_Home || (i = (ksym ^ XKB_KEY_Home) - 1) > 3)
 			break;
 
 		xy = (i & 1) ? &term.c.y : &term.c.x;

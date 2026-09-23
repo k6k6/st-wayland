@@ -65,9 +65,7 @@ delete_image(ImageList *im)
 	if (im->next)
 		im->next->prev = im->prev;
 	if (im->pixmap)
-		XFreePixmap(xw.dpy, (Drawable)im->pixmap);
-	if (im->clipmask)
-		XFreePixmap(xw.dpy, (Drawable)im->clipmask);
+		cairo_surface_destroy((cairo_surface_t *)im->pixmap);
 	free(im->pixels);
 	free(im);
 }
@@ -665,36 +663,4 @@ sixel_parser_deinit(sixel_state_t *st)
 {
 	if (st)
 		sixel_image_deinit(&st->image);
-}
-
-Pixmap
-sixel_create_clipmask(char *pixels, int width, int height)
-{
-	char c, *clipdata, *dst;
-	int b, i, n, y, w;
-	int msb = (XBitmapBitOrder(xw.dpy) == MSBFirst);
-	sixel_color_t *src = (sixel_color_t *)pixels;
-	Pixmap clipmask;
-
-	clipdata = dst = malloc((width+7)/8 * height);
-	if (!clipdata)
-		return (Pixmap)None;
-
-	for (y = 0; y < height; y++) {
-		for (w = width; w > 0; w -= n) {
-			n = MIN(w, 8);
-			if (msb) {
-				for (b = 0x80, c = 0, i = 0; i < n; i++, b >>= 1)
-					c |= (*src++) ? b : 0;
-			} else {
-				for (b = 0x01, c = 0, i = 0; i < n; i++, b <<= 1)
-					c |= (*src++) ? b : 0;
-			}
-			*dst++ = c;
-		}
-	}
-
-	clipmask = XCreateBitmapFromData(xw.dpy, xw.win, clipdata, width, height);
-	free(clipdata);
-	return clipmask;
 }

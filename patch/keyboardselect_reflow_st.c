@@ -463,10 +463,10 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 
 	if (kbds_issearchmode() && !forcequit) {
 		switch (ksym) {
-			case XK_Escape:
+			case XKB_KEY_Escape:
 				kbds_searchlen = 0;
 				/* FALLTHROUGH */
-			case XK_Return:
+			case XKB_KEY_Return:
 				for (kbds_searchcase = 0, i = 0; i < kbds_searchlen; i++) {
 					if (kbds_searchstr[i].u != towlower(kbds_searchstr[i].u)) {
 						kbds_searchcase = 1;
@@ -478,9 +478,9 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 				kbds_selecttext();
 				kbds_setmode(kbds_mode & ~KBDS_MODE_SEARCH);
 				if (count == 0 && kbds_directsearch)
-					ksym = XK_Escape;
+					ksym = XKB_KEY_Escape;
 				break;
-			case XK_BackSpace:
+			case XKB_KEY_BackSpace:
 				if (kbds_searchlen) {
 					kbds_searchlen--;
 					if (kbds_searchlen && (kbds_searchstr[kbds_searchlen].mode & ATTR_WDUMMY))
@@ -504,15 +504,15 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 		}
 		/* If the direct search is aborted, we just go to the next switch
 		 * statement and exit the keyboard selection mode immediately */
-		if (!(ksym == XK_Escape && kbds_directsearch)) {
+		if (!(ksym == XKB_KEY_Escape && kbds_directsearch)) {
 			term.dirty[term.row-1] = 1;
 			return 0;
 		}
 	} else if ((kbds_mode & KBDS_MODE_FIND) && !forcequit) {
 		kbds_findchar = 0;
 		switch (ksym) {
-			case XK_Escape:
-			case XK_Return:
+			case XKB_KEY_Escape:
+			case XKB_KEY_Return:
 				kbds_quant = 0;
 				break;
 			default:
@@ -535,7 +535,7 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 		kbds_oc = kbds_c;
 		kbds_setmode(KBDS_MODE_MOVE);
 		return MODE_KBDSELECT;
-	case XK_V:
+	case XKB_KEY_V:
 		if (kbds_mode & KBDS_MODE_LSELECT) {
 			selclear();
 			kbds_setmode(kbds_mode & ~(KBDS_MODE_SELECT | KBDS_MODE_LSELECT));
@@ -550,7 +550,7 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 			kbds_setmode(kbds_mode | KBDS_MODE_LSELECT);
 		}
 		break;
-	case XK_v:
+	case XKB_KEY_v:
 		if (kbds_mode & KBDS_MODE_SELECT) {
 			selclear();
 			kbds_setmode(kbds_mode & ~(KBDS_MODE_SELECT | KBDS_MODE_LSELECT));
@@ -562,14 +562,14 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 			kbds_setmode(kbds_mode | KBDS_MODE_SELECT);
 		}
 		break;
-	case XK_s:
+	case XKB_KEY_s:
 		if (!(kbds_mode & KBDS_MODE_LSELECT)) {
 			kbds_seltype ^= (SEL_REGULAR | SEL_RECTANGULAR);
 			selextend(kbds_c.x, kbds_c.y, kbds_seltype, 0);
 		}
 		break;
-	case XK_y:
-	case XK_Y:
+	case XKB_KEY_y:
+	case XKB_KEY_Y:
 		if (kbds_isselectmode()) {
 			kbds_copytoclipboard();
 			selclear();
@@ -578,17 +578,17 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 		break;
 	case -2:
 	case -3:
-	case XK_slash:
-	case XK_KP_Divide:
-	case XK_question:
+	case XKB_KEY_slash:
+	case XKB_KEY_KP_Divide:
+	case XKB_KEY_question:
 		kbds_directsearch = (ksym == -2 || ksym == -3);
-		kbds_searchdir = (ksym == XK_question || ksym == -3) ? -1 : 1;
+		kbds_searchdir = (ksym == XKB_KEY_question || ksym == -3) ? -1 : 1;
 		kbds_searchlen = 0;
 		kbds_setmode(kbds_mode | KBDS_MODE_SEARCH);
 		kbds_clearhighlights();
 		return 0;
-	case XK_q:
-	case XK_Escape:
+	case XKB_KEY_q:
+	case XKB_KEY_Escape:
 		if (!kbds_in_use)
 			return 0;
 		if (kbds_quant && !forcequit) {
@@ -602,7 +602,7 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 		}
 		kbds_setmode(KBDS_MODE_MOVE);
 		/* FALLTHROUGH */
-	case XK_Return:
+	case XKB_KEY_Return:
 		if (kbds_isselectmode())
 			kbds_copytoclipboard();
 		kbds_in_use = kbds_quant = 0;
@@ -610,21 +610,21 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 		kscrolldown(&((Arg){ .i = term.histf }));
 		kbds_clearhighlights();
 		return MODE_KBDSELECT;
-	case XK_n:
-	case XK_N:
-		kbds_searchnext(ksym == XK_n ? kbds_searchdir : -kbds_searchdir);
+	case XKB_KEY_n:
+	case XKB_KEY_N:
+		kbds_searchnext(ksym == XKB_KEY_n ? kbds_searchdir : -kbds_searchdir);
 		break;
-	case XK_BackSpace:
+	case XKB_KEY_BackSpace:
 		kbds_moveto(0, kbds_c.y);
 		break;
-	case XK_exclam:
+	case XKB_KEY_exclam:
 		kbds_moveto(term.col/2, kbds_c.y);
 		break;
-	case XK_underscore:
+	case XKB_KEY_underscore:
 		kbds_moveto(term.col-1, kbds_c.y);
 		break;
-	case XK_dollar:
-	case XK_A:
+	case XKB_KEY_dollar:
+	case XKB_KEY_A:
 		eol = kbds_c.len-1;
 		line = kbds_c.line;
 		islast = (kbds_c.x == eol || (kbds_c.x == eol-1 && (line[eol-1].mode & ATTR_WIDE)));
@@ -633,71 +633,71 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 		else
 			kbds_moveto(islast ? term.col-1 : eol, kbds_c.y);
 		break;
-	case XK_asciicircum:
-	case XK_I:
+	case XKB_KEY_asciicircum:
+	case XKB_KEY_I:
 		for (i = 0; i < kbds_c.len && kbds_c.line[i].u == ' '; i++)
 			;
 		kbds_moveto((i < kbds_c.len) ? i : 0, kbds_c.y);
 		break;
-	case XK_End:
-	case XK_KP_End:
+	case XKB_KEY_End:
+	case XKB_KEY_KP_End:
 		kbds_moveto(kbds_c.x, term.row-1);
 		break;
-	case XK_Home:
-	case XK_KP_Home:
-	case XK_H:
+	case XKB_KEY_Home:
+	case XKB_KEY_KP_Home:
+	case XKB_KEY_H:
 		kbds_moveto(kbds_c.x, 0);
 		break;
-	case XK_M:
+	case XKB_KEY_M:
 		kbds_moveto(kbds_c.x, alt ? (term.row-1) / 2
                                   : MIN(term.c.y + term.scr, term.row-1) / 2);
 		break;
-	case XK_L:
+	case XKB_KEY_L:
 		kbds_moveto(kbds_c.x, alt ? term.row-1
 		                          : MIN(term.c.y + term.scr, term.row-1));
 		break;
-	case XK_Page_Up:
-	case XK_KP_Page_Up:
-	case XK_K:
+	case XKB_KEY_Page_Up:
+	case XKB_KEY_KP_Page_Up:
+	case XKB_KEY_K:
 		prevscr = term.scr;
 		kscrollup(&((Arg){ .i = term.row }));
 		kbds_moveto(kbds_c.x, alt ? 0
 		                          : MAX(0, kbds_c.y - term.row + term.scr - prevscr));
 		break;
-	case XK_Page_Down:
-	case XK_KP_Page_Down:
-	case XK_J:
+	case XKB_KEY_Page_Down:
+	case XKB_KEY_KP_Page_Down:
+	case XKB_KEY_J:
 		prevscr = term.scr;
 		kscrolldown(&((Arg){ .i = term.row }));
 		kbds_moveto(kbds_c.x, alt ? term.row-1
 		                          : MIN(MIN(term.c.y + term.scr, term.row-1),
 		                                    kbds_c.y + term.row + term.scr - prevscr));
 		break;
-	case XK_asterisk:
-	case XK_KP_Multiply:
+	case XKB_KEY_asterisk:
+	case XKB_KEY_KP_Multiply:
 		kbds_moveto(term.col/2, (term.row-1) / 2);
 		break;
-	case XK_g:
+	case XKB_KEY_g:
 		kscrollup(&((Arg){ .i = term.histf }));
 		kbds_moveto(kbds_c.x, 0);
 		break;
-	case XK_G:
+	case XKB_KEY_G:
 		kscrolldown(&((Arg){ .i = term.histf }));
 		kbds_moveto(kbds_c.x, alt ? term.row-1 : term.c.y);
 		break;
-	case XK_b:
-	case XK_B:
-		kbds_nextword(1, -1, (ksym == XK_b) ? kbds_sdelim : kbds_ldelim);
+	case XKB_KEY_b:
+	case XKB_KEY_B:
+		kbds_nextword(1, -1, (ksym == XKB_KEY_b) ? kbds_sdelim : kbds_ldelim);
 		break;
-	case XK_w:
-	case XK_W:
-		kbds_nextword(1, +1, (ksym == XK_w) ? kbds_sdelim : kbds_ldelim);
+	case XKB_KEY_w:
+	case XKB_KEY_W:
+		kbds_nextword(1, +1, (ksym == XKB_KEY_w) ? kbds_sdelim : kbds_ldelim);
 		break;
-	case XK_e:
-	case XK_E:
-		kbds_nextword(0, +1, (ksym == XK_e) ? kbds_sdelim : kbds_ldelim);
+	case XKB_KEY_e:
+	case XKB_KEY_E:
+		kbds_nextword(0, +1, (ksym == XKB_KEY_e) ? kbds_sdelim : kbds_ldelim);
 		break;
-	case XK_z:
+	case XKB_KEY_z:
 		prevscr = term.scr;
 		dy = kbds_c.y - (term.row-1) / 2;
 		if (dy <= 0)
@@ -706,47 +706,47 @@ kbds_keyboardhandler(KeySym ksym, char *buf, int len, int forcequit)
 			kscrolldown(&((Arg){ .i = dy }));
 		kbds_moveto(kbds_c.x, kbds_c.y + term.scr - prevscr);
 		break;
-	case XK_f:
-	case XK_F:
-	case XK_t:
-	case XK_T:
-		kbds_finddir = (ksym == XK_f || ksym == XK_t) ? 1 : -1;
-		kbds_findtill = (ksym == XK_t || ksym == XK_T) ? 1 : 0;
+	case XKB_KEY_f:
+	case XKB_KEY_F:
+	case XKB_KEY_t:
+	case XKB_KEY_T:
+		kbds_finddir = (ksym == XKB_KEY_f || ksym == XKB_KEY_t) ? 1 : -1;
+		kbds_findtill = (ksym == XKB_KEY_t || ksym == XKB_KEY_T) ? 1 : 0;
 		kbds_setmode(kbds_mode | KBDS_MODE_FIND);
 		return 0;
-	case XK_semicolon:
-	case XK_r:
+	case XKB_KEY_semicolon:
+	case XKB_KEY_r:
 		kbds_findnext(kbds_finddir, 1);
 		break;
-	case XK_comma:
-	case XK_R:
+	case XKB_KEY_comma:
+	case XKB_KEY_R:
 		kbds_findnext(-kbds_finddir, 1);
 		break;
-	case XK_0:
-	case XK_KP_0:
+	case XKB_KEY_0:
+	case XKB_KEY_KP_0:
 		if (!kbds_quant) {
 			kbds_moveto(0, kbds_c.y);
 			break;
 		}
 		/* FALLTHROUGH */
 	default:
-		if (ksym >= XK_0 && ksym <= XK_9) {                 /* 0-9 keyboard */
-			q = (kbds_quant * 10) + (ksym ^ XK_0);
+		if (ksym >= XKB_KEY_0 && ksym <= XKB_KEY_9) {                 /* 0-9 keyboard */
+			q = (kbds_quant * 10) + (ksym ^ XKB_KEY_0);
 			kbds_quant = q <= 99999999 ? q : kbds_quant;
 			term.dirty[0] = 1;
 			return 0;
-		} else if (ksym >= XK_KP_0 && ksym <= XK_KP_9) {    /* 0-9 numpad */
-			q = (kbds_quant * 10) + (ksym ^ XK_KP_0);
+		} else if (ksym >= XKB_KEY_KP_0 && ksym <= XKB_KEY_KP_9) {    /* 0-9 numpad */
+			q = (kbds_quant * 10) + (ksym ^ XKB_KEY_KP_0);
 			kbds_quant = q <= 99999999 ? q : kbds_quant;
 			term.dirty[0] = 1;
 			return 0;
-		} else if (ksym == XK_k || ksym == XK_h)
+		} else if (ksym == XKB_KEY_k || ksym == XKB_KEY_h)
 			i = ksym & 1;
-		else if (ksym == XK_l || ksym == XK_j)
+		else if (ksym == XKB_KEY_l || ksym == XKB_KEY_j)
 			i = ((ksym & 6) | 4) >> 1;
-		else if (ksym >= XK_KP_Left && ksym <= XK_KP_Down)
-			i = ksym - XK_KP_Left;
-		else if ((XK_Home & ksym) != XK_Home || (i = (ksym ^ XK_Home) - 1) > 3)
+		else if (ksym >= XKB_KEY_KP_Left && ksym <= XKB_KEY_KP_Down)
+			i = ksym - XKB_KEY_KP_Left;
+		else if ((XKB_KEY_Home & ksym) != XKB_KEY_Home || (i = (ksym ^ XKB_KEY_Home) - 1) > 3)
 			return 0;
 
 		kbds_quant = (kbds_quant ? kbds_quant : 1);

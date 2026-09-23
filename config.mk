@@ -9,43 +9,39 @@ MANPREFIX = $(PREFIX)/share/man
 ICONPREFIX = $(PREFIX)/share/pixmaps
 ICONNAME = st.png
 
-X11INC = /usr/X11R6/include
-X11LIB = /usr/X11R6/lib
-
 PKG_CONFIG = pkg-config
-
-# Uncomment this for the alpha patch / ALPHA_PATCH
-#XRENDER = `$(PKG_CONFIG) --libs xrender`
-
-# Uncomment this for the themed cursor patch / THEMED_CURSOR_PATCH
-#XCURSOR = `$(PKG_CONFIG) --libs xcursor`
+WAYLAND_SCANNER = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`
+WAYLAND_PROTOCOLS = `$(PKG_CONFIG) --variable=pkgdatadir wayland-protocols`
 
 # Uncomment the lines below for the ligatures patch / LIGATURES_PATCH
-#LIGATURES_C = hb.c
-#LIGATURES_H = hb.h
-#LIGATURES_INC = `$(PKG_CONFIG) --cflags harfbuzz`
-#LIGATURES_LIBS = `$(PKG_CONFIG) --libs harfbuzz`
+LIGATURES_C = hb.c
+LIGATURES_H = hb.h
+LIGATURES_INC = `$(PKG_CONFIG) --cflags harfbuzz`
+LIGATURES_LIBS = `$(PKG_CONFIG) --libs harfbuzz`
 
 # Uncomment this for the SIXEL patch / SIXEL_PATCH
-#SIXEL_C = sixel.c sixel_hls.c
-#SIXEL_LIBS = `$(PKG_CONFIG) --libs imlib2`
+SIXEL_C = sixel.c sixel_hls.c
 
-# Uncomment for the netwmicon patch / NETWMICON_PATCH
-#NETWMICON_LIBS = `$(PKG_CONFIG) --libs gdlib`
+# netwmicon patch: on Wayland the icon is resolved from the desktop entry
+# (app_id), no image library is needed.
+NETWMICON_LIBS =
 
-# includes and libs, uncomment harfbuzz for the ligatures patch
-INCS = -I$(X11INC) \
+# includes and libs
+INCS = `$(PKG_CONFIG) --cflags wayland-client wayland-cursor xkbcommon cairo cairo-ft` \
        `$(PKG_CONFIG) --cflags fontconfig` \
        `$(PKG_CONFIG) --cflags freetype2` \
        $(LIGATURES_INC)
-LIBS = -L$(X11LIB) -lm -lX11 -lutil -lXft ${SIXEL_LIBS} ${XRENDER} ${XCURSOR}\
+LIBS = -lm -lutil -lrt \
+       `$(PKG_CONFIG) --libs wayland-client wayland-cursor xkbcommon cairo cairo-ft` \
        `$(PKG_CONFIG) --libs fontconfig` \
        `$(PKG_CONFIG) --libs freetype2` \
        $(LIGATURES_LIBS) \
        $(NETWMICON_LIBS)
 
 # flags
-STCPPFLAGS = -DVERSION=\"$(VERSION)\" -DICON=\"$(ICONPREFIX)/$(ICONNAME)\" -D_XOPEN_SOURCE=600
+CFLAGS = -O2 -march=native -flto
+LDFLAGS = -flto
+STCPPFLAGS = -DVERSION=\"$(VERSION)\" -D_XOPEN_SOURCE=700 -D_DEFAULT_SOURCE
 STCFLAGS = $(INCS) $(STCPPFLAGS) $(CPPFLAGS) $(CFLAGS)
 STLDFLAGS = $(LIBS) $(LDFLAGS)
 

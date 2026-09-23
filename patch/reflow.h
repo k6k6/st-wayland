@@ -25,6 +25,7 @@ static void treflow(int, int);
 static void rscrolldown(int);
 static void tresizedef(int, int);
 static void tresizealt(int, int);
+void tfreehist(void);
 void kscrolldown(const Arg *);
 void kscrollup(const Arg *);
 static void tscrollup(int, int, int, int);

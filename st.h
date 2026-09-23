@@ -3,13 +3,73 @@
 #include <stdint.h>
 #include <time.h>
 #include <sys/types.h>
-#include <X11/Xatom.h>
-#include <X11/Xlib.h>
-#include <X11/cursorfont.h>
-#include <X11/keysym.h>
-#include <X11/Xft/Xft.h>
-#include <X11/XKBlib.h>
+#include <xkbcommon/xkbcommon.h>
+#include <cairo.h>
+#include <fontconfig/fontconfig.h>
 #include "patches.h"
+
+/* forward declarations of wayland types used in XWindow */
+struct wl_display;
+struct wl_registry;
+struct wl_compositor;
+struct wl_shm;
+struct wl_seat;
+struct wl_keyboard;
+struct wl_pointer;
+struct wl_surface;
+struct wl_callback;
+struct wl_data_device_manager;
+struct wl_data_device;
+struct wl_data_source;
+struct wl_data_offer;
+struct wl_cursor_theme;
+struct xdg_wm_base;
+struct xdg_surface;
+struct xdg_toplevel;
+struct zxdg_decoration_manager_v1;
+struct zxdg_toplevel_decoration_v1;
+struct zwp_primary_selection_device_manager_v1;
+struct zwp_primary_selection_device_v1;
+struct zwp_primary_selection_source_v1;
+struct zwp_primary_selection_offer_v1;
+struct wp_viewporter;
+struct wp_viewport;
+struct wp_fractional_scale_manager_v1;
+struct wp_fractional_scale_v1;
+struct wp_cursor_shape_manager_v1;
+struct wp_cursor_shape_device_v1;
+struct xdg_system_bell_v1;
+
+/*
+ * Keysyms come from xkbcommon (XKB_KEY_* has the same values as X11 XK_*).
+ * Modifier and button masks keep the X11 names/values so that config.h and
+ * patches remain readable.
+ */
+typedef xkb_keysym_t KeySym;
+
+enum modifier_mask {
+	ShiftMask   = 1 << 0,
+	LockMask    = 1 << 1,
+	ControlMask = 1 << 2,
+	Mod1Mask    = 1 << 3, /* Alt */
+	Mod2Mask    = 1 << 4, /* NumLock */
+	Mod3Mask    = 1 << 5,
+	Mod4Mask    = 1 << 6, /* Super/Logo */
+	Mod5Mask    = 1 << 7,
+	Button1Mask = 1 << 8,
+	Button2Mask = 1 << 9,
+	Button3Mask = 1 << 10,
+	Button4Mask = 1 << 11,
+	Button5Mask = 1 << 12,
+};
+
+enum mouse_button {
+	Button1 = 1,
+	Button2 = 2,
+	Button3 = 3,
+	Button4 = 4,
+	Button5 = 5,
+};
 
 /* macros */
 #define MIN(a, b)		((a) < (b) ? (a) : (b))
@@ -139,9 +199,25 @@ typedef unsigned short ushort;
 
 typedef uint_least32_t Rune;
 
-typedef XftDraw *Draw;
-typedef XftColor Color;
-typedef XftGlyphFontSpec GlyphFontSpec;
+/* colour with 16 bit channels (mirrors XRenderColor/XftColor layout) */
+typedef struct {
+	unsigned short red;
+	unsigned short green;
+	unsigned short blue;
+	unsigned short alpha;
+} RenderColor;
+
+typedef struct {
+	RenderColor color;
+	unsigned long pixel; /* 0xAARRGGBB */
+} Color;
+
+typedef struct {
+	cairo_scaled_font_t *font;
+	unsigned int glyph;
+	float x;
+	float y;
+} GlyphFontSpec;
 
 #define Glyph Glyph_
 typedef struct {
@@ -150,10 +226,25 @@ typedef struct {
 	uint32_t fg;      /* foreground  */
 	uint32_t bg;      /* background  */
 	#if UNDERCURL_PATCH
-	int ustyle;	      /* underline style */
-	int ucolor[3];    /* underline color */
+	/*
+	 * Underline style and colour packed in one word (keeps Glyph at 20
+	 * bytes instead of 32 - this struct is what the scrollback is made of):
+	 *   bits 28-31  colour type: UC_NONE / UC_INDEX / UC_RGB
+	 *   bits 24-27  style + 1   (0 = unset, i.e. style -1)
+	 *   bits  0-23  r<<16|g<<8|b, or the palette index for UC_INDEX
+	 */
+	uint32_t ul;
 	#endif // UNDERCURL_PATCH
 } Glyph;
+
+#if UNDERCURL_PATCH
+enum { UC_NONE = 0, UC_INDEX = 1, UC_RGB = 2 };
+#define UL_STYLE(ul)     ((int)(((ul) >> 24) & 0xf) - 1)
+#define UL_CTYPE(ul)     (((ul) >> 28) & 0xf)
+#define UL_RGB(ul)       ((ul) & 0xffffff)
+#define UL_SET_STYLE(ul, s) ((ul) = ((ul) & ~0x0f000000u) | ((uint32_t)(((s) + 1) & 0xf) << 24))
+#define UL_SET_COLOR(ul, type, v) ((ul) = ((ul) & 0x0f000000u) | ((uint32_t)(type) << 28) | ((uint32_t)(v) & 0xffffff))
+#endif // UNDERCURL_PATCH
 
 typedef Glyph *Line;
 
@@ -243,66 +334,80 @@ typedef struct {
 	int cursor; /* cursor style */
 } TermWindow;
 
+/* pointer (mouse cursor) shapes */
+enum pointer_shape {
+	POINTER_DEFAULT,
+	POINTER_TEXT,
+	POINTER_LINK,
+	POINTER_HIDDEN,
+};
+
 typedef struct {
-	Display *dpy;
-	Colormap cmap;
-	Window win;
-	Drawable buf;
+	/* wayland globals */
+	struct wl_display *dpy;
+	struct wl_registry *registry;
+	struct wl_compositor *compositor;
+	struct wl_shm *shm;
+	struct wl_seat *seat;
+	struct wl_keyboard *keyboard;
+	struct wl_pointer *pointer;
+	struct wl_data_device_manager *datadevmgr;
+	struct wl_data_device *datadev;
+	struct zwp_primary_selection_device_manager_v1 *primselmgr;
+	struct zwp_primary_selection_device_v1 *primseldev;
+	struct xdg_wm_base *wmbase;
+	struct zxdg_decoration_manager_v1 *decomgr;
+	struct wp_viewporter *viewporter;
+	struct wp_fractional_scale_manager_v1 *fracmgr;
+	struct wp_cursor_shape_manager_v1 *cshapemgr;
+	struct xdg_system_bell_v1 *bell;
+	struct zwp_text_input_manager_v3 *timgr;
+	struct zwp_text_input_v3 *textinput;
+	/* window objects */
+	struct wl_surface *win;
+	struct xdg_surface *xdgsurface;
+	struct xdg_toplevel *toplevel;
+	struct zxdg_toplevel_decoration_v1 *deco;
+	struct wp_viewport *viewport;
+	struct wp_fractional_scale_v1 *fracscale;
+	struct wl_callback *frame;
+	/* pointer */
+	struct wp_cursor_shape_device_v1 *cshape;
+	struct wl_cursor_theme *cursortheme;
+	struct wl_surface *cursorsurface;
+	int pointershape;
+	int pointerisvisible;
+	uint32_t pointerserial;
+	int ptrx, ptry;   /* last pointer position in buffer pixels */
+	/* keyboard */
+	struct xkb_context *xkbctx;
+	struct xkb_keymap *keymap;
+	struct xkb_state *xkbstate;
+	uint32_t serial;  /* last input serial */
+	/* rendering */
+	cairo_surface_t *buf;   /* persistent off-screen drawing surface */
+	cairo_t *draw;
 	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
 	#if LIGATURES_PATCH
 	GlyphFontSeq *specseq;
 	#endif // LIGATURES_PATCH
-	Atom xembed, wmdeletewin, netwmname, netwmiconname, netwmpid;
-	#if DRAG_AND_DROP_PATCH
-	Atom XdndTypeList, XdndSelection, XdndEnter, XdndPosition, XdndStatus,
-	     XdndLeave, XdndDrop, XdndFinished, XdndActionCopy, XdndActionMove,
-	     XdndActionLink, XdndActionAsk, XdndActionPrivate, XtextUriList,
-	     XtextPlain, XdndAware;
-	int64_t XdndSourceWin, XdndSourceVersion;
-	int32_t XdndSourceFormat;
-	#endif // DRAG_AND_DROP_PATCH
-	#if FULLSCREEN_PATCH
-	Atom netwmstate, netwmfullscreen;
-	#endif // FULLSCREEN_PATCH
-	#if NETWMICON_PATCH || NETWMICON_LEGACY_PATCH || NETWMICON_FF_PATCH
-	Atom netwmicon;
-	#endif // NETWMICON_PATCH
-	struct {
-		XIM xim;
-		XIC xic;
-		XPoint spot;
-		XVaNestedList spotlist;
-	} ime;
-	Draw draw;
-	#if BACKGROUND_IMAGE_PATCH
-	GC bggc;          /* Graphics Context for background */
-	#endif // BACKGROUND_IMAGE_PATCH
-	Visual *vis;
-	XSetWindowAttributes attrs;
-	#if HIDECURSOR_PATCH || OPENURLONCLICK_PATCH
-	/* Here, we use the term *pointer* to differentiate the cursor
-	 * one sees when hovering the mouse over the terminal from, e.g.,
-	 * a green rectangle where text would be entered. */
-	Cursor vpointer, bpointer; /* visible and hidden pointers */
-	int pointerisvisible;
-	#endif // HIDECURSOR_PATCH
-	#if OPENURLONCLICK_PATCH
-	Cursor upointer;
-	#endif // OPENURLONCLICK_PATCH
-	int scr;
-	int isfixed; /* is fixed geometry? */
-	#if ALPHA_PATCH
-	int depth; /* bit depth */
-	#endif // ALPHA_PATCH
-	int l, t; /* left and top offset */
-	int gm; /* geometry mask */
+	double scale;     /* output scale factor (buffer px per logical px) */
+	int lw, lh;       /* logical (surface) size */
+	int configured;   /* first xdg configure received */
+	int isfixed;      /* is fixed geometry? */
+	int l, t;         /* left and top offset (unused on wayland) */
+	int gm;           /* geometry mask */
 } XWindow;
 
 typedef struct {
-	Atom xtarget;
 	char *primary, *clipboard;
 	struct timespec tclick1;
 	struct timespec tclick2;
+	struct wl_data_source *clipsource;
+	struct zwp_primary_selection_source_v1 *primsource;
+	struct wl_data_offer *clipoffer;
+	struct zwp_primary_selection_offer_v1 *primoffer;
+	int clipoffer_ok, primoffer_ok; /* offer has a text mime type */
 } XSelection;
 
 /* types used in config.h */
@@ -343,7 +448,7 @@ typedef struct {
 	int badweight;
 	short lbearing;
 	short rbearing;
-	XftFont *match;
+	cairo_scaled_font_t *match;
 	FcFontSet *set;
 	FcPattern *pattern;
 } Font;
@@ -353,7 +458,6 @@ typedef struct {
 	Color *col;
 	size_t collen;
 	Font font, bfont, ifont, ibfont;
-	GC gc;
 } DC;
 
 void die(const char *, ...);
@@ -399,11 +503,8 @@ int xgetcolor(int x, unsigned char *r, unsigned char *g, unsigned char *b);
 #if BOXDRAW_PATCH
 int isboxdraw(Rune);
 ushort boxdrawindex(const Glyph *);
-#ifdef XFT_VERSION
-/* only exposed to x.c, otherwise we'll need Xft.h for the types */
-void boxdraw_xinit(Display *, Colormap, XftDraw *, Visual *);
-void drawboxes(int, int, int, int, XftColor *, XftColor *, const XftGlyphFontSpec *, int);
-#endif // XFT_VERSION
+void boxdraw_xinit(cairo_t *);
+void drawboxes(int, int, int, int, Color *, Color *, const GlyphFontSpec *, int);
 #endif // BOXDRAW_PATCH
 
 /* config.h globals */

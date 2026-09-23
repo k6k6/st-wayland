@@ -1,9 +1,11 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdint.h>
 #include <math.h>
 #include <time.h>
-#include <X11/Xft/Xft.h>
-#include <X11/cursorfont.h>
+#include <cairo.h>
+#include <cairo-ft.h>
 #include <hb.h>
 #include <hb-ft.h>
 
@@ -13,10 +15,10 @@
 #define FEATURE(c1,c2,c3,c4) { .tag = HB_TAG(c1,c2,c3,c4), .value = 1, .start = HB_FEATURE_GLOBAL_START, .end = HB_FEATURE_GLOBAL_END }
 #define BUFFER_STEP 256
 
-hb_font_t *hbfindfont(XftFont *match);
+hb_font_t *hbfindfont(cairo_scaled_font_t *match, FT_Face face);
 
 typedef struct {
-	XftFont *match;
+	cairo_scaled_font_t *match;
 	hb_font_t *font;
 } HbFontMatch;
 
@@ -36,6 +38,58 @@ static RuneBuffer hbrunebuffer = { 0, NULL };
 static hb_buffer_t *hbbuffer;
 
 /*
+ * Shaping cache.  Terminals redraw the same text over and over (scrolling,
+ * cursor movement, full-screen dirt), and hb_shape() dominated the frame
+ * cost.  Cache the shaping result of every (font, rune sequence) segment in
+ * a small 2-way set associative table keyed by a hash of the runes.
+ */
+#define SHAPECACHE_SIZE 4096	/* must be a power of two */
+#define SHAPECACHE_MAXLEN 1024	/* segments longer than this are not cached */
+
+typedef struct {
+	cairo_scaled_font_t *font;
+	uint32_t hash;
+	int length;		/* number of input runes */
+	unsigned int count;	/* number of output glyphs */
+	Rune *runes;
+	hb_glyph_info_t *glyphs;
+	hb_glyph_position_t *positions;
+} ShapeEntry;
+
+static ShapeEntry shapecache[SHAPECACHE_SIZE];
+static unsigned int shapetick;
+
+static void
+shapeentry_free(ShapeEntry *e)
+{
+	free(e->runes);
+	free(e->glyphs);
+	free(e->positions);
+	memset(e, 0, sizeof(*e));
+}
+
+static void
+shapecache_clear(void)
+{
+	for (int i = 0; i < SHAPECACHE_SIZE; i++)
+		if (shapecache[i].runes)
+			shapeentry_free(&shapecache[i]);
+}
+
+static inline uint32_t
+shapehash(cairo_scaled_font_t *font, const Rune *runes, int length)
+{
+	uint32_t h = 2166136261u ^ (uint32_t)(uintptr_t)font;
+
+	h *= 16777619u;
+	for (int i = 0; i < length; i++) {
+		h ^= runes[i];
+		h *= 16777619u;
+	}
+	return h;
+}
+
+/*
  * Poplulate the array with a list of font features, wrapped in FEATURE macro,
  * e. g.
  * FEATURE('c', 'a', 'l', 't'), FEATURE('d', 'l', 'i', 'g')
@@ -52,25 +106,26 @@ void
 hbdestroybuffer(void)
 {
 	hb_buffer_destroy(hbbuffer);
+	shapecache_clear();
 }
 
 void
 hbunloadfonts(void)
 {
-	for (int i = 0; i < hbfontcache.capacity; i++) {
+	for (int i = 0; i < hbfontcache.capacity; i++)
 		hb_font_destroy(hbfontcache.fonts[i].font);
-		XftUnlockFace(hbfontcache.fonts[i].match);
-	}
 
 	if (hbfontcache.fonts != NULL) {
 		free(hbfontcache.fonts);
 		hbfontcache.fonts = NULL;
 	}
 	hbfontcache.capacity = 0;
+	/* the cache is keyed on font pointers which may now be reused */
+	shapecache_clear();
 }
 
 hb_font_t *
-hbfindfont(XftFont *match)
+hbfindfont(cairo_scaled_font_t *match, FT_Face face)
 {
 	for (int i = 0; i < hbfontcache.capacity; i++) {
 		if (hbfontcache.fonts[i].match == match)
@@ -79,7 +134,6 @@ hbfindfont(XftFont *match)
 
 	/* Font not found in cache, caching it now. */
 	hbfontcache.fonts = realloc(hbfontcache.fonts, sizeof(HbFontMatch) * (hbfontcache.capacity + 1));
-	FT_Face face = XftLockFace(match);
 	hb_font_t *font = hb_ft_font_create(face, NULL);
 	if (font == NULL)
 		die("Failed to load Harfbuzz font.");
@@ -92,15 +146,69 @@ hbfindfont(XftFont *match)
 }
 
 void
-hbtransform(HbTransformData *data, XftFont *xfont, const Glyph *glyphs, int start, int length)
+hbtransform(HbTransformData *data, cairo_scaled_font_t *sfont, const Glyph *glyphs, int start, int length)
 {
-	uint32_t mode;
+	uint32_t mode, hash;
 	unsigned int glyph_count;
 	int rune_idx, glyph_idx, end = start + length;
 	hb_buffer_t *buffer = hbbuffer;
+	FT_Face face;
+	hb_font_t *font;
+	ShapeEntry *e, *victim;
+	Rune *runes;
 
-	hb_font_t *font = hbfindfont(xfont);
+	/* Resize the buffer if required length is larger. */
+	if (hbrunebuffer.capacity < length) {
+		hbrunebuffer.capacity = (length / BUFFER_STEP + 1) * BUFFER_STEP;
+		hbrunebuffer.runes = realloc(hbrunebuffer.runes, hbrunebuffer.capacity * sizeof(Rune));
+	}
+	runes = hbrunebuffer.runes;
+
+	/* Fill buffer with codepoints. */
+	for (rune_idx = 0, glyph_idx = start; glyph_idx < end; glyph_idx++, rune_idx++) {
+		runes[rune_idx] = glyphs[glyph_idx].u;
+		mode = glyphs[glyph_idx].mode;
+		if (mode & ATTR_WDUMMY)
+			runes[rune_idx] = 0x0020;
+	}
+
+	/* Look the segment up in the shaping cache (2-way set associative). */
+	victim = NULL;
+	if (length > 0 && length <= SHAPECACHE_MAXLEN) {
+		hash = shapehash(sfont, runes, length);
+		for (int way = 0; way < 2; way++) {
+			e = &shapecache[(hash + way) & (SHAPECACHE_SIZE - 1)];
+			if (e->runes && e->font == sfont && e->hash == hash &&
+			    e->length == length &&
+			    memcmp(e->runes, runes, length * sizeof(Rune)) == 0) {
+				data->buffer = NULL;
+				data->glyphs = e->glyphs;
+				data->positions = e->positions;
+				data->count = e->count;
+				return;
+			}
+			/* prefer an empty slot, otherwise evict pseudo-randomly */
+			if (!victim || !e->runes ||
+			    (victim->runes && (shapetick & 1) == way))
+				victim = e;
+		}
+		shapetick++;
+	}
+
+	/*
+	 * The FT_Face is shared with cairo; lock it so that it is scaled for
+	 * this scaled font while harfbuzz is using it, and unlock it before
+	 * cairo touches the font again.
+	 */
+	face = cairo_ft_scaled_font_lock_face(sfont);
+	if (face == NULL) {
+		data->count = 0;
+		return;
+	}
+
+	font = hbfindfont(sfont, face);
 	if (font == NULL) {
+		cairo_ft_scaled_font_unlock_face(sfont);
 		data->count = 0;
 		return;
 	}
@@ -108,28 +216,36 @@ hbtransform(HbTransformData *data, XftFont *xfont, const Glyph *glyphs, int star
 	hb_buffer_reset(buffer);
 	hb_buffer_set_direction(buffer, HB_DIRECTION_LTR);
 	hb_buffer_set_cluster_level(buffer, HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS);
-
-	/* Resize the buffer if required length is larger. */
-	if (hbrunebuffer.capacity < length) {
-		hbrunebuffer.capacity = (length / BUFFER_STEP + 1) * BUFFER_STEP;
-		hbrunebuffer.runes = realloc(hbrunebuffer.runes, hbrunebuffer.capacity * sizeof(Rune));
-	}
-
-	/* Fill buffer with codepoints. */
-	for (rune_idx = 0, glyph_idx = start; glyph_idx < end; glyph_idx++, rune_idx++) {
-		hbrunebuffer.runes[rune_idx] = glyphs[glyph_idx].u;
-		mode = glyphs[glyph_idx].mode;
-		if (mode & ATTR_WDUMMY)
-			hbrunebuffer.runes[rune_idx] = 0x0020;
-	}
-	hb_buffer_add_codepoints(buffer, hbrunebuffer.runes, length, 0, length);
+	hb_buffer_add_codepoints(buffer, runes, length, 0, length);
 
 	/* Shape the segment. */
 	hb_shape(font, buffer, features, sizeof(features)/sizeof(hb_feature_t));
 
+	cairo_ft_scaled_font_unlock_face(sfont);
+
 	/* Get new glyph info. */
 	hb_glyph_info_t *info = hb_buffer_get_glyph_infos(buffer, &glyph_count);
 	hb_glyph_position_t *pos = hb_buffer_get_glyph_positions(buffer, &glyph_count);
+
+	/* Remember the result. */
+	if (victim) {
+		if (victim->runes)
+			shapeentry_free(victim);
+		victim->runes = malloc(length * sizeof(Rune));
+		victim->glyphs = malloc(glyph_count * sizeof(hb_glyph_info_t) + 1);
+		victim->positions = malloc(glyph_count * sizeof(hb_glyph_position_t) + 1);
+		if (victim->runes && victim->glyphs && victim->positions) {
+			memcpy(victim->runes, runes, length * sizeof(Rune));
+			memcpy(victim->glyphs, info, glyph_count * sizeof(hb_glyph_info_t));
+			memcpy(victim->positions, pos, glyph_count * sizeof(hb_glyph_position_t));
+			victim->font = sfont;
+			victim->hash = hash;
+			victim->length = length;
+			victim->count = glyph_count;
+		} else {
+			shapeentry_free(victim);
+		}
+	}
 
 	/* Fill the output. */
 	data->buffer = buffer;
