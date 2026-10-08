@@ -530,6 +530,7 @@ extern int extpipeactive;
 
 #if BOXDRAW_PATCH
 extern const int boxdraw, boxdraw_bold, boxdraw_braille;
+extern const int boxdraw_branch;
 #endif // BOXDRAW_PATCH
 #if ALPHA_PATCH
 extern float alpha;

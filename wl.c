@@ -271,6 +271,9 @@ static ShmBuffer *lastbuf;	/* most recently committed buffer: holds the full pic
 static int wlevents;          /* incremented whenever an event of interest arrived */
 static int ttystarted;        /* the pty exists; cresize may call ttyresize */
 static int pendingw, pendingh; /* logical size from the last xdg_toplevel configure */
+#if ALPHA_PATCH
+static int pendingfullscreen, isfullscreen;
+#endif // ALPHA_PATCH
 static uint32_t seatversion;
 static uint32_t compositorversion;
 static int outputscale = 1;   /* integer scale when fractional scaling is unavailable */
@@ -1907,20 +1910,33 @@ applyalpha(Color *c, float a)
 	c->color.alpha = (unsigned short)(0xffff * a);
 	setpixel(c);
 }
-#endif // ALPHA_PATCH
 
-#if ALPHA_PATCH && ALPHA_FOCUS_HIGHLIGHT_PATCH
+static float
+effectivealpha(void)
+{
+	if (opt_alpha)
+		alpha = strtof(opt_alpha, NULL);
+	/* Fullscreen overrides rendering, never the user's configured opacity. */
+	if (isfullscreen)
+		return 1.0f;
+	#if ALPHA_FOCUS_HIGHLIGHT_PATCH
+	return focused ? alpha : alphaUnfocused;
+	#else
+	return alpha;
+	#endif // ALPHA_FOCUS_HIGHLIGHT_PATCH
+}
+
 void
 xloadalpha(void)
 {
-	float const usedAlpha = focused ? alpha : alphaUnfocused;
-	if (opt_alpha) alpha = strtof(opt_alpha, NULL);
-	applyalpha(&dc.col[defaultbg], usedAlpha);
+	float a = effectivealpha();
+
+	applyalpha(&dc.col[defaultbg], a);
 	#if SELECTION_COLORS_PATCH && SELECTIONBG_ALPHA_PATCH
-	applyalpha(&dc.col[selectionbg], usedAlpha);
+	applyalpha(&dc.col[selectionbg], a);
 	#endif // SELECTION_COLORS_PATCH && SELECTIONBG_ALPHA_PATCH
 }
-#endif // ALPHA_FOCUS_HIGHLIGHT_PATCH
+#endif // ALPHA_PATCH
 
 #if ALPHA_PATCH && ALPHA_FOCUS_HIGHLIGHT_PATCH
 void
@@ -1966,13 +1982,7 @@ xloadcols(void)
 				die("could not allocate color %d\n", i);
 		}
 	#if ALPHA_PATCH
-	/* set alpha value of bg color */
-	if (opt_alpha)
-		alpha = strtof(opt_alpha, NULL);
-	applyalpha(&dc.col[defaultbg], alpha);
-	#if SELECTION_COLORS_PATCH && SELECTIONBG_ALPHA_PATCH
-	applyalpha(&dc.col[selectionbg], alpha);
-	#endif // SELECTION_COLORS_PATCH && SELECTIONBG_ALPHA_PATCH
+	xloadalpha();
 	#endif // ALPHA_PATCH
 	loaded = 1;
 }
@@ -2005,12 +2015,12 @@ xsetcolorname(int x, const char *name)
 	dc.col[x] = ncolor;
 
 	#if ALPHA_PATCH
-	/* set alpha value of bg color */
-	if (x == defaultbg) {
-		if (opt_alpha)
-			alpha = strtof(opt_alpha, NULL);
-		applyalpha(&dc.col[defaultbg], alpha);
-	}
+	if (x == defaultbg
+	    #if SELECTION_COLORS_PATCH && SELECTIONBG_ALPHA_PATCH
+	    || x == selectionbg
+	    #endif // SELECTION_COLORS_PATCH && SELECTIONBG_ALPHA_PATCH
+	)
+		xloadalpha();
 	#endif // ALPHA_PATCH
 	return 0;
 }
@@ -2305,6 +2315,11 @@ xloadfonts(const char *fontstr, double fontsize)
 		die("can't open font %s\n", fontstr);
 
 	FcPatternDestroy(pattern);
+
+	#if FONT2_PATCH
+	/* Seed fallback priority on startup and every zoom/output-scale reload. */
+	xloadsparefonts();
+	#endif // FONT2_PATCH
 }
 
 void
@@ -2361,6 +2376,15 @@ xdgsurface_configure(void *data, struct xdg_surface *surface, uint32_t serial)
 {
 	xdg_surface_ack_configure(surface, serial);
 
+	#if ALPHA_PATCH
+	if (isfullscreen != pendingfullscreen) {
+		isfullscreen = pendingfullscreen;
+		/* Preserve OSC colors and repaint even for a state-only configure. */
+		xloadalpha();
+		tfulldirt();
+	}
+	#endif // ALPHA_PATCH
+
 	if (pendingw > 0 && pendingh > 0 &&
 	    (pendingw != xw.lw || pendingh != xw.lh)) {
 		xw.lw = pendingw;
@@ -2383,6 +2407,14 @@ toplevel_configure(void *data, struct xdg_toplevel *toplevel, int32_t w, int32_t
 {
 	pendingw = w;
 	pendingh = h;
+	#if ALPHA_PATCH
+	uint32_t *state;
+
+	pendingfullscreen = 0;
+	wl_array_for_each(state, states)
+		if (*state == XDG_TOPLEVEL_STATE_FULLSCREEN)
+			pendingfullscreen = 1;
+	#endif // ALPHA_PATCH
 }
 
 static void
@@ -3454,6 +3486,23 @@ xmakeglyphfontspecs(GlyphFontSpec *specs, const Glyph *glyphs, int len, int x, i
 	xp = winx, yp = winy + font->ascent;
 	#endif // VERTCENTER_PATCH
 	cluster_xp = xp; cluster_yp = yp;
+	#if BOXDRAW_PATCH
+	/* Attribute runs are homogeneous. Geometry is one shape per cell,
+	 * independent of font coverage, GSUB ligatures, and shaping caches. */
+	if (glyphs[0].mode & ATTR_BOXDRAW) {
+		for (i = 0; i < len; i++) {
+			if (glyphs[i].mode & ATTR_WDUMMY)
+				continue;
+			specs[numspecs].font = font->match;
+			specs[numspecs].glyph = boxdrawindex(&glyphs[i]);
+			specs[numspecs].x = xp;
+			specs[numspecs].y = yp;
+			numspecs++;
+			xp += win.cw * ((glyphs[i].mode & ATTR_WIDE) ? 2 : 1);
+		}
+		return numspecs;
+	}
+	#endif
 	/* Shape the segment. */
 	hbtransform(&shaped, font->match, glyphs, 0, len);
 	#endif // LIGATURES_PATCH
@@ -3683,6 +3732,9 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 	int winx = borderpx + x * win.cw, winy = borderpx + y * win.ch;
 	#endif // ANYSIZE_PATCH
 	Color *fg, *bg, *temp, revfg, revbg, truefg, truebg, opaquefg;
+	#if ALPHA_PATCH && ALPHA_GRADIENT_PATCH
+	Color gradientbg;
+	#endif // ALPHA_PATCH && ALPHA_GRADIENT_PATCH
 
 	/* Fallback on color display for attributes not supported by the font */
 	if (base.mode & ATTR_ITALIC && base.mode & ATTR_BOLD) {
@@ -3802,11 +3854,12 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 	#endif // KEYBOARDSELECT_PATCH
 
 	#if ALPHA_PATCH && ALPHA_GRADIENT_PATCH
-	// gradient
-	bg->color.alpha = grad_alpha * 0xffff * (win.h - y*win.ch) / win.h + stat_alpha * 0xffff;
-	// uncomment to invert the gradient
-	// bg->color.alpha = grad_alpha * 0xffff * (y*win.ch) / win.h + stat_alpha * 0xffff;
-	#endif // ALPHA_PATCH | ALPHA_GRADIENT_PATCH
+	/* Keep per-row alpha out of the palette; fullscreen is always opaque. */
+	gradientbg = *bg;
+	applyalpha(&gradientbg, isfullscreen ? 1.0f :
+	           grad_alpha * (win.h - y * win.ch) / win.h + stat_alpha);
+	bg = &gradientbg;
+	#endif // ALPHA_PATCH && ALPHA_GRADIENT_PATCH
 
 	#if WIDE_GLYPHS_PATCH
 	if (dmode & DRAW_BG) {

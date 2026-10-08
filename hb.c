@@ -45,6 +45,9 @@ static hb_buffer_t *hbbuffer;
  */
 #define SHAPECACHE_SIZE 4096	/* must be a power of two */
 #define SHAPECACHE_MAXLEN 1024	/* segments longer than this are not cached */
+#ifndef SHAPECACHE_MAXBYTES
+#define SHAPECACHE_MAXBYTES (8u * 1024u * 1024u)
+#endif
 
 typedef struct {
 	cairo_scaled_font_t *font;
@@ -54,14 +57,18 @@ typedef struct {
 	Rune *runes;
 	hb_glyph_info_t *glyphs;
 	hb_glyph_position_t *positions;
+	size_t bytes;		/* requested allocation bytes, excluding allocator overhead */
+	unsigned char recent;	/* second-chance eviction bit */
 } ShapeEntry;
 
 static ShapeEntry shapecache[SHAPECACHE_SIZE];
-static unsigned int shapetick;
+static unsigned int shapetick, shapehand;
+static size_t shapebytes;
 
 static void
 shapeentry_free(ShapeEntry *e)
 {
+	shapebytes -= e->bytes;
 	free(e->runes);
 	free(e->glyphs);
 	free(e->positions);
@@ -74,6 +81,23 @@ shapecache_clear(void)
 	for (int i = 0; i < SHAPECACHE_SIZE; i++)
 		if (shapecache[i].runes)
 			shapeentry_free(&shapecache[i]);
+	shapehand = shapetick = 0;
+}
+
+/* Reclaim before allocating: changing TUI text must not grow the cache
+ * to 4096 long segments. A clock sweep gives recently used entries a
+ * second chance without maintaining an LRU list on every cache hit. */
+static void
+shapecache_makeroom(size_t bytes)
+{
+	while (shapebytes > SHAPECACHE_MAXBYTES - bytes) {
+		ShapeEntry *e = &shapecache[shapehand];
+		shapehand = (shapehand + 1) & (SHAPECACHE_SIZE - 1);
+		if (e->recent)
+			e->recent = 0;
+		else if (e->runes)
+			shapeentry_free(e);
+	}
 }
 
 static inline uint32_t
@@ -94,7 +118,8 @@ shapehash(cairo_scaled_font_t *font, const Rune *runes, int length)
  * e. g.
  * FEATURE('c', 'a', 'l', 't'), FEATURE('d', 'l', 'i', 'g')
  */
-hb_feature_t features[] = { };
+hb_feature_t features[] = {FEATURE('c', 'v', '0', '2'), FEATURE('c', 'v', '0', '1'),
+                           FEATURE('c', 'v', '6', '1')};
 
 void
 hbcreatebuffer(void)
@@ -181,6 +206,7 @@ hbtransform(HbTransformData *data, cairo_scaled_font_t *sfont, const Glyph *glyp
 			if (e->runes && e->font == sfont && e->hash == hash &&
 			    e->length == length &&
 			    memcmp(e->runes, runes, length * sizeof(Rune)) == 0) {
+				e->recent = 1;
 				data->buffer = NULL;
 				data->glyphs = e->glyphs;
 				data->positions = e->positions;
@@ -227,10 +253,15 @@ hbtransform(HbTransformData *data, cairo_scaled_font_t *sfont, const Glyph *glyp
 	hb_glyph_info_t *info = hb_buffer_get_glyph_infos(buffer, &glyph_count);
 	hb_glyph_position_t *pos = hb_buffer_get_glyph_positions(buffer, &glyph_count);
 
-	/* Remember the result. */
-	if (victim) {
+	/* Account for all three allocations, including the zero-glyph guards.
+	 * Oversized entries are shaped normally but not retained. */
+	size_t bytes = (size_t)length * sizeof(Rune) +
+	               (size_t)glyph_count * (sizeof(hb_glyph_info_t) +
+	                                      sizeof(hb_glyph_position_t)) + 2;
+	if (victim && bytes <= SHAPECACHE_MAXBYTES) {
 		if (victim->runes)
 			shapeentry_free(victim);
+		shapecache_makeroom(bytes);
 		victim->runes = malloc(length * sizeof(Rune));
 		victim->glyphs = malloc(glyph_count * sizeof(hb_glyph_info_t) + 1);
 		victim->positions = malloc(glyph_count * sizeof(hb_glyph_position_t) + 1);
@@ -242,6 +273,9 @@ hbtransform(HbTransformData *data, cairo_scaled_font_t *sfont, const Glyph *glyp
 			victim->hash = hash;
 			victim->length = length;
 			victim->count = glyph_count;
+			victim->bytes = bytes;
+			victim->recent = 1;
+			shapebytes += bytes;
 		} else {
 			shapeentry_free(victim);
 		}

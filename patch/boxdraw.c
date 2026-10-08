@@ -4,6 +4,8 @@
  */
 
 #include <cairo.h>
+#include "powerline.c"
+#include "boxextra.c"
 
 /* Rounded non-negative integers division of n / d  */
 #define DIV(n, d) (((n) + (d) / 2) / (d))
@@ -35,7 +37,8 @@ int
 isboxdraw(Rune u)
 {
 	Rune block = u & ~0xff;
-	return (boxdraw && block == 0x2500 && boxdata[(uint8_t)u]) ||
+	return (boxdraw && ((block == 0x2500 && boxdata[(uint8_t)u]) ||
+	                    ispowerline(u) || isboxextra(u))) ||
 	       (boxdraw_braille && block == 0x2800);
 }
 
@@ -43,6 +46,12 @@ isboxdraw(Rune u)
 ushort
 boxdrawindex(const Glyph *g)
 {
+	/* Solid geometry must not change with font weight or italic styling. */
+	if (ispowerline(g->u))
+		return BDP | (uint8_t)g->u;
+	if (isboxextra(g->u))
+		return boxextraindex(g->u) |
+		       ((boxdraw_bold && (g->mode & ATTR_BOLD)) ? BDB : 0);
 	if (boxdraw_braille && (g->u & ~0xff) == 0x2800)
 		return BRL | (uint8_t)g->u;
 	if (boxdraw_bold && (g->mode & ATTR_BOLD))
@@ -64,7 +73,13 @@ void
 drawbox(int x, int y, int w, int h, Color *fg, Color *bg, ushort bd)
 {
 	ushort cat = bd & ~(BDB | 0xff);  /* mask out bold and data */
-	if (bd & (BDL | BDA)) {
+	if (bd & BDX) {
+		drawboxextra(bdcr, x, y, w, h, fg, bg, bd);
+
+	} else if (cat == BDP) {
+		drawpowerline(bdcr, x, y, w, h, fg, 0xe000 | (uint8_t)bd);
+
+	} else if (bd & (BDL | BDA)) {
 		/* lines (light/double/heavy/arcs) */
 		drawboxlines(x, y, w, h, fg, bd);
 

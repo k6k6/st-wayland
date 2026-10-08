@@ -122,13 +122,15 @@ int hidecursor = 1;
 
 #if BOXDRAW_PATCH
 /*
- * 1: render most of the lines/blocks characters without using the font for
- *    perfect alignment between cells (U2500 - U259F except dashes/diagonals).
+ * 1: render lines/blocks, Powerline and extended geometry in cell pixels,
+ *    without depending on font metrics or hinting.
  *    Bold affects lines thickness if boxdraw_bold is not 0. Italic is ignored.
- * 0: disable (render all U25XX glyphs normally from the font).
+ * 0: restore font glyphs for these characters (braille is independent).
  */
 const int boxdraw = 1;
 const int boxdraw_bold = 1;
+/* Git-style branch PUA U+F5D0-F60D; 0 restores font glyphs. Requires boxdraw. */
+const int boxdraw_branch = 1;
 
 /* braille (U28XX):  1: render as adjacent "pixels",  0: use font */
 const int boxdraw_braille = 1;

@@ -1,25 +1,16 @@
 int
 xloadsparefont(FcPattern *pattern, int flags)
 {
-	FcPattern *match;
-	FcResult result;
+	Font spare = {0};
 
-	#if USE_XFTFONTMATCH_PATCH
-	match = XftFontMatch(xw.dpy, xw.scr, pattern, &result);
-	#else
-	match = FcFontMatch(NULL, pattern, &result);
-	#endif // USE_XFTFONTMATCH_PATCH
-	if (!match) {
+	/* Use the same Fontconfig defaults and output scale as the primary font. */
+	if (xloadfont(&spare, pattern))
 		return 1;
-	}
 
-	if (!(frc[frclen].font = XftFontOpenPattern(xw.dpy, match))) {
-		FcPatternDestroy(match);
-		return 1;
-	}
-
+	/* The fallback cache owns the scaled font, but needs no search pattern. */
+	frc[frclen].font = spare.match;
+	FcPatternDestroy(spare.pattern);
 	frc[frclen].flags = flags;
-	/* Believe U+0000 glyph will present in each default font */
 	frc[frclen].unicodep = 0;
 	frclen++;
 
@@ -30,72 +21,66 @@ void
 xloadsparefonts(void)
 {
 	FcPattern *pattern;
-	double fontval;
+	double fontval, dpi;
 	int fc;
 	char **fp;
 
 	if (frclen != 0)
-		die("can't embed spare fonts. cache isn't empty");
+		die("can't embed spare fonts. cache isn't empty\n");
 
-	/* Calculate count of spare fonts */
-	fc = sizeof(font2) / sizeof(*font2);
+	fc = LEN(font2);
 	if (fc == 0)
 		return;
 
-	/* Allocate memory for cache entries. */
+	/* Reserve four styles per font, before any automatic fallback entries. */
 	if (frccap < 4 * fc) {
-		frccap += 4 * fc - frccap;
+		frccap = 4 * fc;
 		frc = xrealloc(frc, frccap * sizeof(Fontcache));
 	}
 
 	for (fp = font2; fp - font2 < fc; ++fp) {
-
-		if (**fp == '-')
-			pattern = XftXlfdParse(*fp, False, False);
-		else
-			pattern = FcNameParse((FcChar8 *)*fp);
-
+		/* Wayland uses Fontconfig names, not X11 XLFD names. */
+		pattern = FcNameParse((const FcChar8 *)*fp);
 		if (!pattern)
 			die("can't open spare font %s\n", *fp);
 
-		if (defaultfontsize > 0 && defaultfontsize != usedfontsize) {
-			if (FcPatternGetDouble(pattern, FC_PIXEL_SIZE, 0, &fontval) ==
-					FcResultMatch) {
-				fontval *= usedfontsize / defaultfontsize;
-				FcPatternDel(pattern, FC_PIXEL_SIZE);
-				FcPatternDel(pattern, FC_SIZE);
-				FcPatternAddDouble(pattern, FC_PIXEL_SIZE, fontval);
-			} else if (FcPatternGetDouble(pattern, FC_SIZE, 0, &fontval) ==
-					FcResultMatch) {
-				fontval *= usedfontsize / defaultfontsize;
-				FcPatternDel(pattern, FC_PIXEL_SIZE);
-				FcPatternDel(pattern, FC_SIZE);
-				FcPatternAddDouble(pattern, FC_SIZE, fontval);
-			}
+		/* Convert points to logical pixels before xloadfont applies scale.
+		 * Fontconfig's default for an unspecified size is 12 points. */
+		if (FcPatternGetDouble(pattern, FC_PIXEL_SIZE, 0, &fontval) != FcResultMatch) {
+			if (FcPatternGetDouble(pattern, FC_SIZE, 0, &fontval) != FcResultMatch)
+				fontval = 12;
+			if (FcPatternGetDouble(pattern, FC_DPI, 0, &dpi) != FcResultMatch)
+				dpi = 96.0;
+			fontval *= dpi / 72.0;
 		}
-
-		FcPatternAddBool(pattern, FC_SCALABLE, 1);
-
-		#if !USE_XFTFONTMATCH_PATCH
-		FcConfigSubstitute(NULL, pattern, FcMatchPattern);
-		XftDefaultSubstitute(xw.dpy, xw.scr, pattern);
-		#endif // USE_XFTFONTMATCH_PATCH
+		if (defaultfontsize > 0)
+			fontval *= usedfontsize / defaultfontsize;
+		FcPatternDel(pattern, FC_PIXEL_SIZE);
+		FcPatternDel(pattern, FC_SIZE);
+		FcPatternAddDouble(pattern, FC_PIXEL_SIZE, fontval);
+		FcPatternAddBool(pattern, FC_SCALABLE, FcTrue);
 
 		if (xloadsparefont(pattern, FRC_NORMAL))
 			die("can't open spare font %s\n", *fp);
 
 		FcPatternDel(pattern, FC_SLANT);
+		#if !DISABLE_ITALIC_FONTS_PATCH
 		FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ITALIC);
+		#endif
 		if (xloadsparefont(pattern, FRC_ITALIC))
 			die("can't open spare font %s\n", *fp);
 
 		FcPatternDel(pattern, FC_WEIGHT);
+		#if !DISABLE_BOLD_FONTS_PATCH
 		FcPatternAddInteger(pattern, FC_WEIGHT, FC_WEIGHT_BOLD);
+		#endif
 		if (xloadsparefont(pattern, FRC_ITALICBOLD))
 			die("can't open spare font %s\n", *fp);
 
 		FcPatternDel(pattern, FC_SLANT);
+		#if !DISABLE_ROMAN_FONTS_PATCH
 		FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ROMAN);
+		#endif
 		if (xloadsparefont(pattern, FRC_BOLD))
 			die("can't open spare font %s\n", *fp);
 

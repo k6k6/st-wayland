@@ -83,6 +83,97 @@
 - **boxdraw
 - 测试手段：`wtype`（键盘）、`ydotool`（鼠标，需配合 `hl.dsp.cursor.move({x=..,y=..})`  warp 光标）、`wl-copy/wl-paste`、`grim` 截图。
 
+### 全屏时自动不透明
+
+启用 `ALPHA_PATCH` 时，Wayland 合成器通知窗口进入全屏后，背景不透明度自动设为
+`1.0`；退出全屏后恢复配置中的 `alpha`（启用焦点透明度时按当前焦点使用
+`alpha` / `alphaUnfocused`）。最大化不视为全屏，不需要启用 `FULLSCREEN_PATCH`。
+
+全屏只覆盖实际绘制的透明度，不改写原有设置；全屏中调整透明度会在退出后生效。
+切换不重载配色，保留应用通过 OSC 设置的颜色；选区透明度和渐变也遵循全屏覆盖。
+即使窗口尺寸未改变，进入／退出全屏也会重绘背景和边框。
+
+无显示服务器回归测试：`tools/fullscreen_alpha_test.sh`。运行 `make` 后用 `./st`
+试用；已运行的终端需重新启动，构建不会自动安装。
+
+### FONT2_PATCH：备用字体
+
+Wayland 后端已支持 `FONT2_PATCH`，使用 Fontconfig + Cairo，不再依赖 Xft。
+启用时将 `patches.h` 中的 `FONT2_PATCH` 设为 `1`（如需新配置也默认启用，同步修改
+`patches.def.h`），然后在 `config.h` 的 `font2[]` 中按优先级配置字体，例如：
+
+```c
+static char *font2[] = {
+    "Noto Sans CJK SC:size=12",
+    "Symbols Nerd Font Mono:pixelsize=16",
+};
+```
+
+- 主字体已有的字形不受影响；缺字时按 `font2[]` 顺序查找，均缺字才进入自动字体回退。
+- 每个备用字体预加载 normal / italic / bold-italic / bold 四种样式；空列表也可正常使用。
+- `size` 为点数（默认 DPI 为 96，也可指定 `dpi`），`pixelsize` 为逻辑像素；未指定大小时为 12 点。
+  字体随终端 zoom 和 Wayland 整数/分数缩放重载，保留备用字体与主字体的大小比例。
+- 字体名使用 Fontconfig 格式，不支持 X11 XLFD 格式；请用 `fc-match '字体名'` 检查实际匹配结果。
+  未安装的字体可能由 Fontconfig 替换为其他字体。
+- 修改配置后运行 `make`。开关默认保持关闭，不改动现有用户字体配置。
+- 无显示服务器回归测试：`tools/font2_test.sh`（需构建依赖、Python 3 和 DejaVu Sans/Serif/Mono 字体）。
+  在临时副本中验证补丁关闭、空列表、多字体及关闭 ligatures 的构建与字体选择、缩放和缓存清理。
+
+### 内建 Powerline 几何符号
+
+启用 `BOXDRAW_PATCH` 且 `config.h` 中 `boxdraw = 1` 时，以下字符与 `█` 一样按
+**实际单元格的像素宽高**绘制，不再依赖字体轮廓、字体回退或 HarfBuzz shaping：
+
+- `U+E0B0–U+E0BF`：实心／细线箭头、圆角端帽、四个方向的三角形及斜线。
+- `U+E0D2`、`U+E0D4`：上下梯形端帽。
+
+这覆盖 Neovim 字符画中的 `   ` 和状态栏中的 `  `，避免它们与
+终端生成的方块、背景色块采用不同尺寸而产生接缝。曲线和斜线保留灰度抗锯齿；
+绘制限制在当前格子内，保留已有背景、透明度及正常反显／选区处理。字号、行高与
+Wayland 缩放改变后直接使用新的 cell 尺寸；实心图形不随 bold/italic 变形。
+
+普通 Nerd 图标（例如 ``、文件夹）、装饰性 Powerline 字符仍走原字体路径。
+关闭 `boxdraw` 可恢复这些几何符号的字体绘制；不需要修改字体文件。
+
+实现：`patch/powerline.c`、`patch/boxdraw.c`；`wl.c` 的几何字符 run 在 shaping 前
+直接生成一格一个绘制项。新增文件是 `wl.o` 的显式构建依赖。
+
+无显示服务器回归测试：`tools/powerline_test.sh`。测试在临时目录构建，不改动当前
+字体配置或安装终端。编译后可运行 `./st -e sh tools/powerline_demo.sh` 查看拼接示例。
+
+### 扩展 Unicode 几何字符
+
+同一个 `BOXDRAW_PATCH` / `boxdraw = 1` 开关也接管 Unicode 几何绘图字符：
+
+- 完整的 `U+2500–U+259F` 框线／块元素：补齐双段、三段、四段虚线及斜线，
+  `╭╮╰╯` 使用真正的圆弧并与原有直线的像素中心、线宽对齐。
+- Legacy Computing 六分块、分数斜坡、三角形分块、八分条纹、棋盘格与填充图案。
+- 新旧单线／双线斜线网格、菱形，含补充平面 `U+1CCxx`、`U+1CExx` 字符。
+- 单色圆、椭圆、扇形、半圆和四分／十二分圆弧；多格圆弧采用共同的几何坐标，
+  不依赖字体是否包含较新 Unicode 字形。
+
+范围按照几何语义筛选，不接管分数字符、乐谱符号、彩色圆形 Emoji 或普通 Nerd 图标。
+闭合图形的字重／斜体不改变占格边界；线条可以按 `boxdraw_bold` 加粗。
+极小单元格无法表示所有分块或虚线细节，采用像素取整并限制在当前单元格内。
+圆形保持圆形比例，只有椭圆及指定多格圆弧使用独立横／纵半径；不强行将圆形拉伸
+填满高而窄的单元格。双斜线按平行笔画绘制，不推断邻格连接，连续铺排的角点可能
+有间断；内建绘制并不意味着任意字符组合都能组成无缝图案。
+
+实现分为 `patch/boxlines_extra.c`、`patch/boxblocks_extra.c`、`patch/boxcircles.c`、
+`patch/boxmosaics.c`、`patch/boxbranch.c`，由 `patch/boxextra.c` 统一管理裁剪和 Cairo
+状态。`BDX` 编码以 12 位（4 位页号 + 8 位码点）保存 Unicode
+页号及页内码点，在原有 16 位 boxdraw 接口中保留补充平面字符，不截断成低字节。
+普通 ASCII 文本在扩展几何判定入口快速排除；没有新增库依赖或常驻字形缓存。
+
+回归测试：`tools/box_geometry_test.sh`。`tools/box_geometry_inventory.h` 记录了参考
+`box.txt` 中的 445 个几何字符、追加的 423 个 Ghostty 兼容字符，以及 12 个保留
+字体绘制的字符。测试不依赖字体或显示服务器，在临时副本中验证连字、boxdraw、
+branch 开关、完整 Unicode 码点路由、像素边界、字形语义、缩放和状态恢复。
+原有 `tools/powerline_test.sh`、`tools/font2_test.sh` 应一并运行。
+
+编译后可在新终端中运行 `cat ~/Notes/box.txt` 检查完整拼接图；此文件仅作输入，
+构建和测试不会修改它。运行 `./st` 只试用本地构建，`make` 不会安装系统终端。
+
 ## 6. 已知问题 / 待办
 
 ### 内存优化（2026-09-21 晚）
@@ -105,3 +196,48 @@
 - **空闲时 CPU 60–70%、发热**：Wayland 合成器对每次 `wl_surface.commit` 都会回一个 `wl_buffer.release` 事件，主循环被它唤醒后无条件 `draw()`，而 `draw()` 每次都重画光标格 → 产生 damage → 再 commit → 再 release……形成死循环（失焦时光标不画所以不明显）。修复：`run()` 增加 `needdraw` 标志，只有 tty 输出 / 输入事件 / 光标闪烁定时器才触发 `draw()`。实测聚焦空闲 0% CPU，输入、`seq 200000` 刷屏、连续 colresize、fcitx5 均正常。
 
 7. **`x.c` 与 X11 构建PLAN**——当前 `x.c` 留作参考；确认稳定后可删除，并把 `protocols/` 加入 `.gitignore`（目前是未跟踪状态）。
+
+### Ghostty 兼容扩展：423 个字符
+
+以 Ghostty v1.3.1 / commit `76895d97b74ff6b24c2b1543bcd69ccc18048a4d` 的
+sprite 注册范围为参考，增加以下全部 A–I 分组：
+
+| 组 | 类型 | 码点 | 数量 |
+|---|---|---|---:|
+| A | 空心直角三角形 | U+25F8–25FA、25FF | 4 |
+| B | 左侧 1/3、2/3 宽块 | U+1FBCE–1FBCF | 2 |
+| C | 十六分块、局部条块、居中四分块 | U+1CE90–1CEAF、1FBE4–1FBE7 | 36 |
+| D | 框线接头 | U+1CC1B–1CC1E、1CE16–1CE19 | 8 |
+| E | 反色斜线／菱形 | U+1FBBD–1FBBF | 3 |
+| F | 八分块：2 列 × 4 行 | U+1CD00–1CDE5 | 230 |
+| G | 分离四分块 | U+1CC21–1CC2F | 15 |
+| H | 分离六分块 | U+1CE51–1CE8F | 63 |
+| I | Git 风格分支图 PUA | U+F5D0–F60D | 62 |
+
+默认全部启用。I 组额外受 `config.h` 中 `boxdraw_branch = 1` 控制；改成 `0`
+并重新编译可仅恢复这些 PUA 字符的字体绘制。它们是私用区约定，不是通用 Unicode
+字义。普通 Nerd 图标和字母不受影响；没有把光标或下划线等非字符装饰混入此列表。
+
+G/H 的留缝是符号语义，不应填平。极小格子无法保留分离块的空隙时退化为无间隙
+的相应占位，可能消失的分块也不会溢出当前格子。八分块的 230 项位图由 Unicode
+名字导出，并与上述 Ghostty 版本的数据交叉校验。反色图案和分支节点在临时 alpha
+组中计算覆盖率，最后只合成一次前景色；不清除终端背景，也不将其强行变成不透明。
+
+内建码点总数现在为 **1,143**（此前 720 + 本次 423），包含全部上述版本 Ghostty
+的 1,084 个有效 sprite 码点，以及 st 原有另外 59 个几何字符。U+1FB93 空占位不
+接管。这里比较的是码点覆盖范围，不承诺与 Ghostty 逐像素相同。
+
+演示：
+```sh
+./st -e python3 tools/box_geometry_demo.py
+```
+
+额外测试头 `tools/box_geometry_extra_test.h` 校验完整码点路由（包括 Branch 独立
+关闭）、全部八分块掩码、分离块空隙、反色补集、节点空心和连线方向、渐隐方向、
+半透明合成及 1.25/1.5/2 倍 CTM 缩放。可选的 sanitizer 运行方式：
+```sh
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+BOX_GEOMETRY_TEST_CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' \
+BOX_GEOMETRY_TEST_LDFLAGS='-fsanitize=address,undefined' tools/box_geometry_test.sh
+```
+此命令关闭了内存泄漏检测（图形库可能保留进程级缓存）；地址和未定义行为检查仍开启。

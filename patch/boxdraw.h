@@ -14,7 +14,8 @@
  *   https://github.com/GNOME/vte/blob/master/doc/boxes.txt
  */
 
-/* Each shape is encoded as 16-bits. Higher bits are category, lower are data */
+/* Each shape is encoded as 16 bits. Old categories use an 8-bit payload;
+ * BDX instead uses a 12-bit Unicode page/codepoint payload (see boxextra.c). */
 /* Categories (mutually exclusive except BDB): */
 /* For convenience, BDL/BDA/BBS/BDB are 1 bit each, the rest are enums */
 #define BDL (1<<8)   /* Box Draw Lines (light/double/heavy) */
@@ -26,6 +27,8 @@
 #define BBR (4<<10)  /* Box Block Right X/8 */
 #define BBQ (5<<10)  /* Box Block Quadrants */
 #define BRL (6<<10)  /* Box Braille (data is lower byte of U28XX) */
+#define BDP (7<<10)  /* Geometric Powerline (lower byte of UE0XX) */
+#define BDX (1<<13)  /* Extended geometry: 12-bit page/codepoint, not old flags */
 
 #define BBS (1<<14)  /* Box Block Shades */
 #define BDB (1<<15)  /* Box Draw is Bold */
@@ -209,6 +212,6 @@ static const unsigned short boxdata[256] = {
 	/* Shades, data is an alpha value in 25% units (1/4, 1/2, 3/4) */
 	[0x91] = BBS + 1, [0x92] = BBS + 2, [0x93] = BBS + 3,
 
-	/* U+2504 - U+250B, U+254C - U+254F: unsupported (dashes) */
-	/* U+2571 - U+2573: unsupported (diagonals) */
+	/* Dashes U+2504..250B/U+254C..254F and diagonals U+2571..2573
+	 * are routed through boxextra.c instead of this table. */
 };
