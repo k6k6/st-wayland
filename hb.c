@@ -159,7 +159,20 @@ hbfindfont(cairo_scaled_font_t *match, FT_Face face)
 
 	/* Font not found in cache, caching it now. */
 	hbfontcache.fonts = realloc(hbfontcache.fonts, sizeof(HbFontMatch) * (hbfontcache.capacity + 1));
-	hb_font_t *font = hb_ft_font_create(face, NULL);
+	/*
+	 * Take a reference on the FT_Face for the lifetime of the cached
+	 * hb_font_t.  The face belongs to cairo's unscaled font, and cairo
+	 * calls FT_Done_Face() on idle faces as soon as MAX_OPEN_FACES (10)
+	 * are open, which a full-screen redraw pulling in many fallback
+	 * fonts reaches easily.  HarfBuzz reads table data straight out of
+	 * the memory mapping FreeType made for that face, so a face dying
+	 * under a live hb_font_t leaves every cached table pointer
+	 * dangling: once another font file is mapped over that address
+	 * range, shaping reads garbage table data and crashes.
+	 * hb_ft_font_create() keeps no reference, hb_ft_font_create_referenced()
+	 * does and drops it when the hb_font_t is destroyed.
+	 */
+	hb_font_t *font = hb_ft_font_create_referenced(face);
 	if (font == NULL)
 		die("Failed to load Harfbuzz font.");
 

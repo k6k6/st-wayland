@@ -35,7 +35,7 @@
 | `st.h` | 删除全部 X11 头文件；新增 `KeySym = xkb_keysym_t`、X11 兼容的 modifier/button mask 枚举（值与 X11 一致，`config.h` 无需改键位语义）；`Color` 改为 16-bit RGBA + `0xAARRGGBB pixel`；`Font.match` 改为 `cairo_scaled_font_t*`；`XWindow` 重写为 Wayland 对象集合（display/seat/keyboard/pointer/xdg 对象/viewport/scale/offscreen cairo surface/specbuf…）；`XSelection` 改为 Wayland offer/source 句柄；boxdraw API 改为 cairo 签名 |
 | `win.h` | 仅新增 `wlsetpointer(int)` 声明（供 openurlonclick patch 用） |
 | `st.c` | 删除 X11 include；`dc.col[defaultbg].pixel` 的 alpha 提取保留（`Color.pixel` 仍含 alpha 字节，供 sixel 背景色用） |
-| `hb.h` / `hb.c` | harfbuzz 适配 cairo：`hbtransform(..., cairo_scaled_font_t*, ...)`，每次 shape 前 `cairo_ft_scaled_font_lock_face`、shape 后 unlock |
+| `hb.h` / `hb.c` | harfbuzz 适配 cairo：`hbtransform(..., cairo_scaled_font_t*, ...)`，每次 shape 前 `cairo_ft_scaled_font_lock_face`、shape 后 unlock；缓存的 hb_font 用 `hb_ft_font_create_referenced()` 自己持有 FT_Face 引用（cairo 会回收空闲 face） |
 | `patch/boxdraw.c` | 全部 `XftDrawRect` 改为 cairo `bdrect()`（SOURCE 算子，等价语义），shade 混合改为纯内存计算 |
 | `patch/netwmicon.c` | 改为空实现：图标由合成器/任务栏按 `app_id` 从 `st.desktop`（`Icon=st` → `pixmaps/st.png`）解析，**不再链接 libgd**（去掉了它拖进来的 26 个编解码/X11 库）；`xdg-toplevel-icon` 协议同时移除 |
 | `patch/openurlonclick.h` | `restoremousecursor()` 改调 `wlsetpointer(POINTER_TEXT)` |
@@ -175,6 +175,10 @@ branch 开关、完整 Unicode 码点路由、像素边界、字形语义、缩�
 构建和测试不会修改它。运行 `./st` 只试用本地构建，`make` 不会安装系统终端。
 
 ## 6. 已知问题 / 待办
+
+### 已修复（2026-10-16）
+- **yazi 里快速按 `j` 滚动时 segfault**（崩溃在 `hb_shape_plan_create_cached2` 内）：`hb.c` 的 `hbfontcache` 用 `hb_ft_font_create()` 建 hb_font，不持有 FT_Face 的生命周期，而该 face 属于 cairo 的 unscaled font——cairo 在同时打开超过 `MAX_OPEN_FACES`(10) 个 face 时会 `FT_Done_Face()` 掉空闲 face（`cairo-ft-font.c` 的 `_cairo_ft_unscaled_font_lock_face` 随机挑一个 `lock_count == 0` 的），全屏重绘不断引入回退字体时很容易越过这个上限。HarfBuzz 的 table 指针直接指向 FreeType 为该 face 建的 mmap（`ft_face->stream->read == NULL` 时 `hb_ft_face_create()` 走零拷贝，blob 的 data 就是 `stream->base`），face 一关，映射释放，再被别的字体文件映射到同一地址后整形就读到垃圾 table 数据（GSUB 段读到 cour.ttf 的 `loca` 内容，`featureVariations` 偏移成野指针）而崩溃。修复：改用 `hb_ft_font_create_referenced()`，hb_font 自带引用，`hbunloadfonts()` 销毁字体时释放。
+  无显示服务器回归测试：`tools/hb_face_lifetime_test.sh`。它确定性触发 cairo 的 face 回收（锁住其它 face，让主字体 face 成为唯一空闲候选），再断言主字体 face 与字体文件映射仍然有效、缓存字体整形结果与新建字体一致，最后跑一轮回退字体抖动。嵌套无头 Hyprland（`WLR_BACKENDS=headless`）里 `st -e yazi /usr/share/applications` + `wtype -d 6` 连按 `j`：修复前稳定 SIGSEGV，修复后不再复现。
 
 ### 内存优化（2026-09-21 晚）
 对比 foot 的 `smaps_rollup`，差距主要在 Anonymous（堆）与 libgd 拖入的共享库。已做：

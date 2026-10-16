@@ -65,6 +65,7 @@ CPU 1315 ms（`perf stat` 含子进程；`--no-inherit` 约 513 ms）。按 DSO�
 - 未命中：正常 `hb_shape` 后复制进 victim 槽（优先空槽，否则按 `shapetick` 奇偶伪随机淘汰）。
 - 段长 > `SHAPECACHE_MAXLEN`(1024) 不缓存。
 - `hbunloadfonts()`（字体重载/缩放）和 `hbdestroybuffer()` 时 `shapecache_clear()`——因为键里有 font 指针，重载后指针可能复用。
+- `hbfontcache` 里的 hb_font 用 `hb_ft_font_create_referenced()` 建立：HarfBuzz 的 table 指针指向 FT_Face 的文件 mmap（零拷贝），而 cairo 在打开超过 `MAX_OPEN_FACES`(10) 个 face 后会 `FT_Done_Face()` 空闲 face；不自己持引用就会被回收，之后整形读到野指针而崩溃（回归测试 `tools/hb_face_lifetime_test.sh`）。
 - 效果：harfbuzz 44% → 0.5%。
 
 ### 3.2 `wl.c`：背景矩形直接写内存
