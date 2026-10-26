@@ -180,6 +180,9 @@ static inline uint32_t premulpixel(const Color *);
 static void present(void);
 static unsigned int glyphindex(cairo_scaled_font_t *, Rune);
 static void updatesize(void);
+#if CURSOR_TRAIL_PATCH
+static void trailreset(void);
+#endif
 static void pastestart(int);
 static void pasteread(void);
 static void sendqueue_flush(int);
@@ -1695,6 +1698,9 @@ xresize(int col, int row)
 {
 	win.tw = col * win.cw;
 	win.th = row * win.ch;
+	#if CURSOR_TRAIL_PATCH
+	trailreset();
+	#endif
 
 	/*
 	 * Buffers of the old size are recreated (fully damaged, filled with
@@ -2543,6 +2549,10 @@ updatesize(void)
 		wp_viewport_set_destination(xw.viewport, xw.lw, xw.lh);
 }
 
+#if CURSOR_TRAIL_PATCH
+#include "patch/cursortrail.c"
+#endif
+
 /*
  * Keyboard
  */
@@ -2599,6 +2609,9 @@ static void
 focusout(void)
 {
 	win.mode &= ~MODE_FOCUSED;
+	#if CURSOR_TRAIL_PATCH
+	trailreset();
+	#endif
 	if (IS_SET(MODE_FOCUS))
 		ttywrite("\033[O", 3, 0);
 	#if ALPHA_PATCH && ALPHA_FOCUS_HIGHLIGHT_PATCH
@@ -4462,6 +4475,12 @@ drawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 		g.mode ^= ATTR_REVERSE;
 	#endif // KEYBOARDSELECT_PATCH
 
+	#if CURSOR_TRAIL_PATCH
+	struct timespec trailnow;
+	clock_gettime(CLOCK_MONOTONIC, &trailnow);
+	trailupdate(cx, cy, g, drawcol, &trailnow);
+	#endif
+
 	/* draw the new one */
 	if (IS_SET(MODE_FOCUSED)) {
 		switch (win.cursor) {
@@ -4626,9 +4645,12 @@ xsettitle(char *p)
 int
 xstartdraw(void)
 {
-	if (!IS_SET(MODE_VISIBLE))
+	if (!IS_SET(MODE_VISIBLE) || !startframe())
 		return 0;
-	return startframe();
+	#if CURSOR_TRAIL_PATCH
+	trailprepare();
+	#endif
+	return 1;
 }
 
 #if LIGATURES_PATCH && WIDE_GLYPHS_PATCH
@@ -4919,6 +4941,11 @@ xfinishdraw(void)
 	}
 	#endif // SIXEL_PATCH
 
+	#if CURSOR_TRAIL_PATCH
+	struct timespec trailnow;
+	clock_gettime(CLOCK_MONOTONIC, &trailnow);
+	trailpaint(&trailnow);
+	#endif
 	present();
 }
 
@@ -4944,6 +4971,12 @@ xsetmode(int set, unsigned int flags)
 {
 	int mode = win.mode;
 	MODBIT(win.mode, set, flags);
+	#if CURSOR_TRAIL_PATCH
+	/* Visibility is checked at draw time: TUIs often hide/show the cursor
+	 * within one update, which must not interrupt a visible trail. */
+	if ((win.mode ^ mode) & MODE_REVERSE)
+		trailreset();
+	#endif
 	#if OPENURLONCLICK_PATCH
 	if (win.mode & MODE_MOUSE && xw.pointerisvisible)
 		wlsetpointer(POINTER_TEXT);
@@ -4955,6 +4988,9 @@ xsetmode(int set, unsigned int flags)
 int
 xsetcursor(int cursor)
 {
+	#if CURSOR_TRAIL_PATCH
+	int previous = win.cursor;
+	#endif
 	#if BLINKING_CURSOR_PATCH
 	if (!BETWEEN(cursor, 0, 8)) /* 7-8: st extensions */
 	#else
@@ -4970,6 +5006,10 @@ xsetcursor(int cursor)
 	#else
 	win.cursor = cursor;
 	#endif // DEFAULT_CURSOR_PATCH
+	#if CURSOR_TRAIL_PATCH
+	if (win.cursor != previous)
+		trailreset();
+	#endif
 	#if BLINKING_CURSOR_PATCH
 	cursorblinks = win.cursor == 0 || win.cursor == 1 ||
 	               win.cursor == 3 || win.cursor == 5 ||
@@ -5341,6 +5381,13 @@ run(void)
 			}
 		}
 
+		#if CURSOR_TRAIL_PATCH
+		/* Animation frames use the same compositor pacing as terminal updates.
+		 * Once settled there is no timer, wakeup or extra idle redraw. */
+		if (trailneedsframe())
+			needdraw = 1;
+		#endif
+
 		/*
 		 * Unlike X11, the compositor answers every commit with a
 		 * wl_buffer.release event, which wakes this loop up.  Only
@@ -5382,6 +5429,11 @@ run(void)
 		if (needdraw)
 			blinkattr = tattrset(ATTR_BLINK);
 		wl_display_flush(xw.dpy);
+		#if CURSOR_TRAIL_PATCH
+		/* Handle a missing callback/free buffer without spinning. */
+		if (trailneedsframe())
+			timeout = timeout < 0 ? FRAME_TIMEOUT : MIN(timeout, FRAME_TIMEOUT);
+		#endif
 		drawing = 0;
 		needdraw = 0;
 	}

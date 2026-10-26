@@ -37,6 +37,7 @@ static KeySym mappedkeys[] = {
 	XKB_KEY_o,
 	XKB_KEY_u,
 	XKB_KEY_w,
+  XKB_KEY_p,
 	XKB_KEY_0,
 	XKB_KEY_1,
 	XKB_KEY_2,
@@ -835,4 +836,5 @@ static Key key[] = {
 	{ XKB_KEY_i,            Mod4Mask,                       "\033[105;9u",  0,  0},
 	{ XKB_KEY_w,            Mod4Mask,                       "\033[119;9u",  0,  0},
 	{ XKB_KEY_a,            Mod4Mask,                       "\033[97;9u",   0,  0},
+	{ XKB_KEY_p,            ControlMask|Mod4Mask,           "\033[112;13u",   0,  0},
 };

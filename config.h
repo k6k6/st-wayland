@@ -5,7 +5,7 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static char* font = "Maple Mono NF CN:size=10.5:antialias=true:autohint=true";
+static char* font = "Maple Mono NF CN:size=11:antialias=true:autohint=true";
 #if FONT2_PATCH
 /* Spare fonts */
 static char* font2[] = {
@@ -93,7 +93,7 @@ int allowwindowops = 0;
  * near minlatency, but it waits longer for slow updates to avoid partial draw.
  * low minlatency will tear/flicker more, as it can "detect" idle too early.
  */
-static double minlatency = 16;
+static double minlatency = 8;
 static double maxlatency = 17;
 
 #if SYNC_PATCH
@@ -114,6 +114,15 @@ static unsigned int blinktimeout = 800;
  * thickness of underline and bar cursors
  */
 static unsigned int cursorthickness = 2;
+
+#if CURSOR_TRAIL_PATCH
+/* Kitty-style trail: 0 disables; otherwise minimum cursor dwell in ms. */
+static unsigned int cursortrail = 40;
+/* Fastest/slowest corner decay in ms (positive, slow >= fast). */
+static double cursortraildecay[2] = {100, 400};
+/* Minimum horizontal OR vertical move in cells; 2 skips ordinary typing. */
+static int cursortrailthreshold = 2;
+#endif
 
 #if HIDECURSOR_PATCH
 /* Hide the X cursor whenever a key is pressed. 0: off, 1: on */
@@ -203,15 +212,15 @@ static const char* colorname[] = {
     "#cc7b47",
     "#995d70",
     "#4b756b",
-    "#444f4c",
+    "#241f1c",
 
     [255] = 0,
 
     /* more colors can be added after 255 to use with DefaultXX */
-    "#8f8f8f",
+    "#b56839",
     "#cc7b47",
     "#e5d8be",
-    "#6a626d",
+    "#3a322d",
 };
 
 /*

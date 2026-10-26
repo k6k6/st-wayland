@@ -75,7 +75,7 @@ $(PROTODIR):
 	mkdir -p $(PROTODIR)
 
 st.o: config.h st.h win.h
-wl.o: arg.h config.h st.h win.h patch/font2.c patch/font2.h \
+wl.o: arg.h config.h st.h win.h patch/font2.c patch/font2.h patch/cursortrail.c \
       patch/boxdraw.c patch/boxdraw.h patch/powerline.c patch/boxextra.c \
       patch/boxlines_extra.c patch/boxblocks_extra.c patch/boxcircles.c \
 	patch/boxmosaics.c patch/boxbranch.c \

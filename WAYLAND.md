@@ -96,6 +96,35 @@
 无显示服务器回归测试：`tools/fullscreen_alpha_test.sh`。运行 `make` 后用 `./st`
 试用；已运行的终端需重新启动，构建不会自动安装。
 
+### CURSOR_TRAIL_PATCH：光标拖尾
+
+Wayland 后端新增 kitty 风格的平滑光标拖尾：真实光标立即到达目标，半透明尾迹
+按移动方向拉伸、收拢并淡出；支持块、竖线、下划线和双宽块光标。不复制 kitty
+源码，不增加 GPU、线程或库依赖，也不分配额外的全屏缓冲。
+
+当前 `patches.h` 已启用 `CURSOR_TRAIL_PATCH = 1`；`patches.def.h` 中默认关闭，
+保留新配置的 opt-in 行为。以下设置位于 `config.h`：
+
+```c
+static unsigned int cursortrail = 40;          /* 移动前最少停留时间，毫秒；0 关闭 */
+static double cursortraildecay[2] = {100, 400}; /* 最快／最慢角点收拢时间，毫秒 */
+static int cursortrailthreshold = 2;          /* 横向或纵向至少移动多少格 */
+```
+
+- `cursortrail` 是触发前的停留时间，**不是动画时长**，与 kitty 的同名选项含义类似。
+  默认跳过快速 TUI 布局更新及普通单格打字；希望逐格移动也有拖尾可将 threshold 设为 1。
+- `cursortraildecay` 使用毫秒（kitty 使用秒），两个值应为正数且第二个不小于第一个。
+  `{60, 180}` 更利落，`{100, 400}` 更明显。尾迹沿用当前光标颜色。
+- 失焦、隐藏、闪烁的隐藏阶段、输入法 preedit 和滚动历史期间不显示拖尾；
+  屏幕切换、尺寸／字号变化、光标样式变化时重新定位，不拖着旧屏幕飞行。
+- 动画复用 `wl_surface.frame` 节流，静止后不再唤醒；同步更新期间保持原有绘制暂停。
+  每帧重绘上一尾迹覆盖的终端行，恢复连字、文本和 sixel，不留下残影。
+- 这是软件渲染下的近似视觉效果，不实现 kitty 自定义 shader 的火焰／运动模糊。
+
+运行 `make && ./st` 试用本地构建；已有窗口需要重新启动。
+无显示服务器回归测试：`tools/cursortrail_test.sh`。
+演示：`./st -e python3 tools/cursortrail_demo.py`（运行后按 Ctrl+C 退出）。
+
 ### FONT2_PATCH：备用字体
 
 Wayland 后端已支持 `FONT2_PATCH`，使用 Fontconfig + Cairo，不再依赖 Xft。

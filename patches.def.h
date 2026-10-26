@@ -66,6 +66,9 @@
  */
 #define BLINKING_CURSOR_PATCH 0
 
+/* Wayland-only time-based cursor trail, configured in config.h. */
+#define CURSOR_TRAIL_PATCH 0
+
 /* By default bold text is rendered with a bold font in the bright variant of the current color.
  * This patch makes bold text rendered simply as bold, leaving the color unaffected.
  * https://st.suckless.org/patches/bold-is-not-bright/

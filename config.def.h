@@ -115,6 +115,15 @@ static unsigned int blinktimeout = 800;
  */
 static unsigned int cursorthickness = 2;
 
+#if CURSOR_TRAIL_PATCH
+/* Kitty-style trail: 0 disables; otherwise minimum cursor dwell in ms. */
+static unsigned int cursortrail = 40;
+/* Fastest/slowest corner decay in ms (positive, slow >= fast). */
+static double cursortraildecay[2] = {100, 400};
+/* Minimum horizontal OR vertical move in cells; 2 skips ordinary typing. */
+static int cursortrailthreshold = 2;
+#endif
+
 #if HIDECURSOR_PATCH
 /* Hide the X cursor whenever a key is pressed. 0: off, 1: on */
 int hidecursor = 1;
