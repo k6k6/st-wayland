@@ -943,6 +943,45 @@ sendjob_done(SendJob *j)
 	j->len = j->off = 0;
 }
 
+/*
+ * write() to a pipe whose read end was already closed raises SIGPIPE, and the
+ * default action for that signal is to kill the process.  Selection data is
+ * written to a pipe that the requesting client owns: it may stop reading
+ * after the first byte, or close the fd before we have written anything at
+ * all (clipboard managers and pickers do exactly that), so a write there must
+ * never be able to take the terminal down.
+ *
+ * SIGPIPE is blocked for the duration of the write and the instance our write
+ * raised is reaped again, so the caller just sees EPIPE and can drop the
+ * transfer.  When SIGPIPE was already blocked by the caller, its pending
+ * signal is left untouched.
+ */
+static ssize_t
+writenopipe(int fd, const void *buf, size_t len)
+{
+	struct timespec zero = {0, 0};
+	sigset_t block, old;
+	ssize_t n;
+	int err, wasblocked;
+
+	sigemptyset(&block);
+	sigaddset(&block, SIGPIPE);
+	if (sigprocmask(SIG_BLOCK, &block, &old) < 0)
+		return write(fd, buf, len);
+	wasblocked = sigismember(&old, SIGPIPE);
+
+	n = write(fd, buf, len);
+	err = errno;
+	if (n < 0 && err == EPIPE && !wasblocked) {
+		/* SIGPIPE raised by write() is thread directed: reap ours */
+		while (sigtimedwait(&block, NULL, &zero) < 0 && errno == EINTR)
+			;
+	}
+	sigprocmask(SIG_SETMASK, &old, NULL);
+	errno = err;
+	return n;
+}
+
 /* write as much as possible for the job with the given fd (or all if fd < 0) */
 void
 sendqueue_flush(int fd)
@@ -955,7 +994,7 @@ sendqueue_flush(int fd)
 		if (j->data == NULL || (fd >= 0 && j->fd != fd))
 			continue;
 		while (j->off < j->len) {
-			n = write(j->fd, j->data + j->off, j->len - j->off);
+			n = writenopipe(j->fd, j->data + j->off, j->len - j->off);
 			if (n < 0) {
 				if (errno == EAGAIN || errno == EINTR)
 					break;
