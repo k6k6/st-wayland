@@ -22,22 +22,35 @@ trailreset(void)
 	trail.valid = trail.active = 0;
 }
 
+/* Reasons to forget the recorded cursor outright: it is not drawn at all, or
+ * its cell no longer marks the same place. MODE_HIDE is deliberately absent:
+ * it is a per-frame decision, not a state change. TUIs such as Neovim bracket
+ * almost every redraw with "\033[?25l ... \033[?25h", so a frame that lands
+ * inside such a bracket must keep the position the next visible frame has to
+ * animate from - forgetting it turns the jump into a snap. */
 static int
-trailvisible(void)
+trailgone(void)
 {
 	if (!cursortrail || !IS_SET(MODE_VISIBLE) || !IS_SET(MODE_FOCUSED) ||
-	    IS_SET(MODE_HIDE) || ime.preedit || win.cursor > 6)
-		return 0;
+	    ime.preedit || win.cursor > 6)
+		return 1;
 	#if SCROLLBACK_PATCH || REFLOW_PATCH
 	if (term.scr)
-		return 0;
+		return 1;
 	#endif
 	#if BLINKING_CURSOR_PATCH
 	if (IS_SET(MODE_BLINK) && (win.cursor == 0 || win.cursor == 1 ||
 	    win.cursor == 3 || win.cursor == 5))
-		return 0;
+		return 1;
 	#endif
-	return 1;
+	return 0;
+}
+
+/* May the trail be painted in this frame? */
+static int
+trailvisible(void)
+{
+	return !trailgone() && !IS_SET(MODE_HIDE);
 }
 
 static int
@@ -55,7 +68,7 @@ trailprepare(void)
 	 * can never leak into tty parsing (notably sixel pruning) while waiting
 	 * for a free buffer. The ordinary row redraw restores ligatures too. */
 	trail.seen = 0;
-	if (!trailvisible())
+	if (trailgone())
 		trailreset();
 	if (!trail.painted || !term.dirty || term.row <= 0 || win.ch <= 0)
 		return;
@@ -99,11 +112,16 @@ trailupdate(int cx, int cy, Glyph g, Color color, const struct timespec *nowp)
 	struct timespec now = *nowp;
 	TrailPoint target[4];
 	double x, y, w, h, dx, dy, radius, projection, fast, slow, dwell;
-	int i, moved, context, restyle, wide = !!(g.mode & ATTR_WIDE), keyboard = 0;
+	int i, moved, context, restyle, screen,
+		wide = !!(g.mode & ATTR_WIDE), keyboard = 0;
 
 	trail.seen = 1;
 	if (!trailvisible()) {
-		trailreset();
+		/* drawcursor() returns before reaching us while the cursor is
+		 * hidden, so this only catches the "gone" cases; a hidden frame
+		 * keeps the recorded position for the frame that shows it again. */
+		if (trailgone())
+			trailreset();
 		return;
 	}
 	#if KEYBOARDSELECT_PATCH
@@ -129,10 +147,14 @@ trailupdate(int cx, int cy, Glyph g, Color color, const struct timespec *nowp)
 	target[1] = (TrailPoint){x + w, y};
 	target[2] = (TrailPoint){x + w, y + h};
 	target[3] = (TrailPoint){x, y + h};
-	/* Snapping contexts: interpolating across a screen switch or a cell
-	 * metric change would paint the trail at meaningless coordinates. */
-	context = !trail.valid || trail.screen != term.line ||
-		trail.cw != win.cw || trail.ch != win.ch;
+	/* Snapping contexts: a cell metric change (resize, zoom, font reload)
+	 * makes the recorded pixel coordinates meaningless. A screen switch is
+	 * NOT one of them: window geometry is untouched, so the previous cursor
+	 * still marks a real pixel and the jump onto the other screen (a TUI
+	 * taking over or handing the screen back) is exactly the kind of
+	 * deliberate move a trail should show. */
+	context = !trail.valid || trail.cw != win.cw || trail.ch != win.ch;
+	screen = trail.valid && trail.screen != term.line;
 	/* A cursor shape change (DECSCUSR) is not a snapping context: TUIs such
 	 * as Neovim emit it in the same write as the cursor move that belongs to
 	 * the new mode, so the move must still animate. Only a shape change that
@@ -145,7 +167,9 @@ trailupdate(int cx, int cy, Glyph g, Color color, const struct timespec *nowp)
 	moved = trail.cx != cx || trail.cy != cy;
 	dwell = TIMEDIFF(now, trail.moved);
 	trailadvance(&now);
-	if (context || (moved && !restyle && !trail.active &&
+	/* A screen switch belongs with restyle: a deliberate one-shot jump, not
+	 * the machine-driven churn the dwell/threshold skip guards against. */
+	if (context || (moved && !restyle && !screen && !trail.active &&
 	    (dwell < cursortrail ||
 	     (abs(cx - trail.cx) < cursortrailthreshold &&
 	      abs(cy - trail.cy) < cursortrailthreshold)))) {
@@ -198,8 +222,23 @@ trailpaint(const struct timespec *nowp)
 	double left, top, right, bottom, error = 0, opacity;
 	int i, j, n = 0, lower, bw, bh;
 
-	if (!trail.seen || !trailvisible()) {
+	if (trailgone() || (!trail.seen && !IS_SET(MODE_HIDE))) {
+		/* Not drawn at all any more, or visible yet skipped by this frame
+		 * (scrollback, keyboard selection): nothing can be trusted about
+		 * where the cursor is. */
+		trail.painted = 0;
 		trailreset();
+		return;
+	}
+	if (!trailvisible()) {
+		/* Cursor hidden for this frame: trailprepare() already dirtied the
+		 * old trail rows, so erase it here but keep the recorded position.
+		 * The animation is dropped (it could not be seen) and the resting
+		 * corner aligned to the recorded target, so nothing asks for the
+		 * frames that would never paint anything. */
+		memcpy(trail.corner, trail.target, sizeof trail.corner);
+		trail.active = 0;
+		trail.painted = 0;
 		return;
 	}
 	trailadvance(nowp);

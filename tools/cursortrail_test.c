@@ -123,19 +123,30 @@ timing(void)
 static void
 contexts(void)
 {
+	/* Hiding the cursor is a per-frame decision, not a snapping context: TUIs
+	 * hide it across redraws, so the recorded position (and an animation in
+	 * flight) must survive a frame that lands inside the hidden phase. */
 	jump(); win.mode |= MODE_HIDE; trailprepare();
-	assert(!trail.valid && !trail.active);
+	assert(trail.valid && trail.active);
+	paint(180);
+	assert(trail.valid && !trail.active && !trail.painted);
+	assert(!trailneedsframe());
+	win.mode &= ~MODE_HIDE;
 	jump(); focusout(); assert(!trail.active && !trail.valid);
 	jump(); ime.preedit = "preedit"; trailprepare();
 	assert(!trail.active); ime.preedit = NULL;
 	#if REFLOW_PATCH || SCROLLBACK_PATCH
 	jump(); term.scr = 1; trailprepare(); assert(!trail.active);
 	#endif
+	/* A screen switch keeps the window geometry, so it is not a snapping
+	 * context: the jump onto the other screen is animated. */
 	jump(); term.line = otherlines; update(18, 8, 200, blank);
-	assert(!trail.active && trail.screen == otherlines);
+	assert(trail.active && trail.screen == otherlines);
+	term.line = lines;
 	jump(); win.cw++; update(18, 8, 200, blank);
 	assert(!trail.active); win.cw--;
-	jump(); xsetmode(1, MODE_HIDE); trailprepare(); assert(!trail.active);
+	jump(); xsetmode(1, MODE_HIDE); trailprepare();
+	assert(trail.valid && trail.active); /* Hidden, not forgotten. */
 	jump(); xsetmode(1, MODE_HIDE); xsetmode(0, MODE_HIDE);
 	assert(trail.active); /* Batched hide/move/show must retain the trail. */
 	/* DECSCUSR alone is not a snapping context either; restyles() covers it. */
@@ -156,6 +167,75 @@ contexts(void)
 	win.cursor = 2; assert(trailvisible());
 	#endif
 	jump(); win.mode &= ~MODE_VISIBLE; assert(!trailneedsframe());
+}
+
+static void
+screenentry(void)
+{
+	TrailPoint old[4];
+	int i;
+
+	/* Entering a full screen TUI is the moment the trail is meant to be seen:
+	 * "\033[?1049h\033[H\033[2J" swaps to the alternate screen, positions the
+	 * cursor somewhere else and the trail has to fly from the shell cursor to
+	 * the new cell. It used to snap, because term.line changed. */
+	fresh(); update(5, 9, 0, blank);
+	memcpy(old, trail.target, sizeof old);
+	term.line = otherlines;
+	update(6, 1, 10, blank); /* dwell 10 ms < cursortrail 40: skip guard */
+	assert(trail.active && trailneedsframe() && trail.screen == otherlines);
+	for (i = 0; i < 4; i++) {
+		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
+		assert(fabs(trail.from[i].y - old[i].y) < 1e-9);
+	}
+	advance(600);
+	assert(!trail.active && !trailneedsframe());
+
+	/* The threshold guard is bypassed too: a settlement long enough to pass
+	 * the dwell rule, but only one cell apart across the screen swap. */
+	fresh(); update(5, 4, 0, blank);
+	memcpy(old, trail.target, sizeof old);
+	term.line = otherlines;
+	update(6, 4, 200, blank);
+	assert(trail.active);
+	for (i = 0; i < 4; i++)
+		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
+	advance(600);
+	assert(!trail.active);
+
+	/* Leaving the TUI animates back to the shell prompt just the same. */
+	fresh(); update(20, 3, 0, blank);
+	memcpy(old, trail.target, sizeof old);
+	term.line = otherlines;
+	update(3, 9, 20, blank);
+	assert(trail.active && trail.screen == otherlines);
+	for (i = 0; i < 4; i++)
+		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
+	advance(600);
+	assert(!trail.active);
+
+	/* Neovim brackets the redraw with "\033[?25l" / "\033[?25h" and moves the
+	 * cursor in between. A frame that lands in the hidden phase must neither
+	 * paint nor forget the shell position, so the frame that shows the cursor
+	 * again still animates the whole distance. */
+	fresh(); update(5, 9, 0, blank);
+	memcpy(old, trail.target, sizeof old);
+	win.mode |= MODE_HIDE;
+	term.line = otherlines;
+	trailprepare();
+	paint(80);
+	assert(trail.valid && !trail.painted && !trail.active);
+	assert(!trailneedsframe());
+	win.mode &= ~MODE_HIDE;
+	update(20, 3, 100, blank);
+	assert(trail.active && trailneedsframe());
+	for (i = 0; i < 4; i++) {
+		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
+		assert(fabs(trail.from[i].y - old[i].y) < 1e-9);
+	}
+	advance(600);
+	assert(!trail.active);
+	term.line = lines;
 }
 
 static void
@@ -405,7 +485,8 @@ main(void)
 	buffers[2].buffer = (struct wl_buffer *)(uintptr_t)1;
 	buffers[2].width = win.w; buffers[2].height = win.h; buffers[2].busy = 1;
 	fresh(); assert(xstartdraw());
-	timing(); contexts(); restyles(); shapes(); pixelsandcleanup(); restoration();
+	timing(); contexts(); screenentry(); restyles(); shapes();
+	pixelsandcleanup(); restoration();
 	for (int i = 0; i < 2; i++) {
 		cairo_destroy(buffers[i].cr); cairo_surface_destroy(buffers[i].surface);
 		free(buffers[i].data);
@@ -416,8 +497,8 @@ main(void)
 	#endif
 	xunloadfonts(); free(frc); free(dc.col);
 	cairo_debug_reset_static_data(); FcFini();
-	puts("PASS: trigger/easing/retarget, styles/contexts, mode-switch retarget, "
-	     "pixels/clipping/damage, text/ligature restoration, "
+	puts("PASS: trigger/easing/retarget, styles/contexts, TUI screen entry, "
+	     "mode-switch retarget, pixels/clipping/damage, text/ligature restoration, "
 	     "buffer rotation/shortage, idle");
 	return 0;
 }
