@@ -133,21 +133,22 @@ contexts(void)
 	#endif
 	jump(); term.line = otherlines; update(18, 8, 200, blank);
 	assert(!trail.active && trail.screen == otherlines);
-	jump(); win.cursor = 6; update(18, 8, 200, blank);
-	assert(!trail.active);
 	jump(); win.cw++; update(18, 8, 200, blank);
 	assert(!trail.active); win.cw--;
 	jump(); xsetmode(1, MODE_HIDE); trailprepare(); assert(!trail.active);
 	jump(); xsetmode(1, MODE_HIDE); xsetmode(0, MODE_HIDE);
 	assert(trail.active); /* Batched hide/move/show must retain the trail. */
-	jump(); assert(!xsetcursor(4)); assert(!trail.active);
+	/* DECSCUSR alone is not a snapping context either; restyles() covers it. */
+	jump(); assert(!xsetcursor(4)); assert(trail.active && trail.valid);
 	jump(); assert(!xsetcursor(2)); assert(trail.active);
 	xsetmode(0, MODE_HIDE); assert(trail.active); /* Redundant TUI updates. */
 	jump(); trailprepare(); /* Caller skipped xdrawcursor, e.g. scrollback. */
 	paint(200); assert(!trail.active);
 	#if KEYBOARDSELECT_PATCH
+	/* Keyboard selection only changes the cursor's colour context, so the
+	 * accompanying move is animated like any other restyle. */
 	jump(); win.mode |= MODE_KBDSELECT; update(18, 8, 200, blank);
-	assert(!trail.active);
+	assert(trail.active && trail.keyboard);
 	#endif
 	#if BLINKING_CURSOR_PATCH
 	jump(); win.cursor = 1; win.mode |= MODE_BLINK;
@@ -155,6 +156,67 @@ contexts(void)
 	win.cursor = 2; assert(trailvisible());
 	#endif
 	jump(); win.mode &= ~MODE_VISIBLE; assert(!trailneedsframe());
+}
+
+static void
+restyles(void)
+{
+	TrailPoint bar[4];
+	int i, ox = 14, oy = 6;
+
+	/* Neovim emits DECSCUSR in the same write as the cursor move of the new
+	 * mode: "\033[2 q\033[1;15H" leaving insert mode, "\033[6 q" when
+	 * entering it. Both moves must animate, starting from the old shape. */
+	fresh(); win.cursor = 6;
+	update(ox, oy, 0, blank);
+	assert(trail.valid && !trail.active);
+	assert(trail.target[1].x - trail.target[0].x == cursorthickness);
+	memcpy(bar, trail.corner, sizeof bar);
+	assert(!xsetcursor(2)); /* \033[2 q */
+	update(ox - 1, oy, 200, blank);
+	assert(trail.active && trailneedsframe());
+	for (i = 0; i < 4; i++) {
+		assert(fabs(trail.from[i].x - bar[i].x) < 1e-9);
+		assert(fabs(trail.from[i].y - bar[i].y) < 1e-9);
+	}
+	/* Bar -> block: the new target is one full cell wide, one cell left. */
+	assert(trail.target[1].x - trail.target[0].x == win.cw);
+	assert(trail.target[2].y - trail.target[1].y == win.ch);
+	advance(300);
+	/* Moving left: the leading (left) corners have arrived, the trailing
+	 * right edge is still collapsing from the bar width onto the block. */
+	assert(trail.corner[0].x == trail.target[0].x);
+	assert(trail.corner[0].x == bar[0].x - win.cw);
+	assert(trail.corner[1].x > trail.target[1].x);
+	assert(trail.corner[1].x <= bar[1].x);
+	advance(600);
+	assert(!trail.active && !trailneedsframe());
+	for (i = 0; i < 4; i++) {
+		assert(trail.corner[i].x == trail.target[i].x);
+		assert(trail.corner[i].y == trail.target[i].y);
+	}
+
+	/* The reverse direction: block -> bar, moving right. */
+	assert(!xsetcursor(6));
+	update(ox, oy, 900, blank);
+	assert(trail.active);
+	assert(trail.from[2].y - trail.from[1].y == win.ch);
+	assert(trail.target[1].x - trail.target[0].x == cursorthickness);
+	advance(1300);
+	assert(!trail.active);
+	for (i = 0; i < 4; i++) {
+		assert(trail.corner[i].x == trail.target[i].x);
+		assert(trail.corner[i].y == trail.target[i].y);
+	}
+
+	/* A shape-only change draws no trail, but must not stall a later move. */
+	fresh(); update(ox, oy, 0, blank);
+	win.cursor = 6; /* e.g. a TUI editor applying a configured shape */
+	update(ox, oy, 100, blank);
+	assert(!trail.active && trail.valid);
+	assert(trail.corner[1].x - trail.corner[0].x == cursorthickness);
+	update(ox + 4, oy, 300, blank);
+	assert(trail.active);
 }
 
 static void
@@ -337,7 +399,7 @@ main(void)
 	buffers[2].buffer = (struct wl_buffer *)(uintptr_t)1;
 	buffers[2].width = win.w; buffers[2].height = win.h; buffers[2].busy = 1;
 	fresh(); assert(xstartdraw());
-	timing(); contexts(); shapes(); pixelsandcleanup(); restoration();
+	timing(); contexts(); restyles(); shapes(); pixelsandcleanup(); restoration();
 	for (int i = 0; i < 2; i++) {
 		cairo_destroy(buffers[i].cr); cairo_surface_destroy(buffers[i].surface);
 		free(buffers[i].data);
@@ -348,7 +410,9 @@ main(void)
 	#endif
 	xunloadfonts(); free(frc); free(dc.col);
 	cairo_debug_reset_static_data(); FcFini();
-	puts("PASS: trigger/easing/retarget, styles/contexts, pixels/clipping/damage, text/ligature restoration, buffer rotation/shortage, idle");
+	puts("PASS: trigger/easing/retarget, styles/contexts, mode-switch retarget, "
+	     "pixels/clipping/damage, text/ligature restoration, "
+	     "buffer rotation/shortage, idle");
 	return 0;
 }
 #else

@@ -99,7 +99,7 @@ trailupdate(int cx, int cy, Glyph g, Color color, const struct timespec *nowp)
 	struct timespec now = *nowp;
 	TrailPoint target[4];
 	double x, y, w, h, dx, dy, radius, projection, fast, slow, dwell;
-	int i, moved, context, wide = !!(g.mode & ATTR_WIDE), keyboard = 0;
+	int i, moved, context, restyle, wide = !!(g.mode & ATTR_WIDE), keyboard = 0;
 
 	trail.seen = 1;
 	if (!trailvisible()) {
@@ -129,14 +129,23 @@ trailupdate(int cx, int cy, Glyph g, Color color, const struct timespec *nowp)
 	target[1] = (TrailPoint){x + w, y};
 	target[2] = (TrailPoint){x + w, y + h};
 	target[3] = (TrailPoint){x, y + h};
+	/* Snapping contexts: interpolating across a screen switch or a cell
+	 * metric change would paint the trail at meaningless coordinates. */
 	context = !trail.valid || trail.screen != term.line ||
-		trail.cw != win.cw || trail.ch != win.ch ||
-		trail.style != win.cursor || trail.wide != wide ||
-		trail.keyboard != keyboard;
+		trail.cw != win.cw || trail.ch != win.ch;
+	/* A cursor shape change (DECSCUSR) is not a snapping context: TUIs such
+	 * as Neovim emit it in the same write as the cursor move that belongs to
+	 * the new mode, so the move must still animate. Only a shape change that
+	 * comes alone rectifies the resting corner, without a trail. The same
+	 * write also bypasses the dwell/threshold skip below: a mode switch is a
+	 * deliberate one-cell jump, not the machine-driven churn those guard
+	 * against. */
+	restyle = trail.valid && (trail.style != win.cursor ||
+		trail.wide != wide || trail.keyboard != keyboard);
 	moved = trail.cx != cx || trail.cy != cy;
 	dwell = TIMEDIFF(now, trail.moved);
 	trailadvance(&now);
-	if (context || (moved && !trail.active &&
+	if (context || (moved && !restyle && !trail.active &&
 	    (dwell < cursortrail ||
 	     (abs(cx - trail.cx) < cursortrailthreshold &&
 	      abs(cy - trail.cy) < cursortrailthreshold)))) {
@@ -157,6 +166,9 @@ trailupdate(int cx, int cy, Glyph g, Color color, const struct timespec *nowp)
 		}
 		memcpy(trail.from, trail.corner, sizeof trail.from);
 		trail.active = 1;
+	} else if (restyle) {
+		memcpy(trail.corner, target, sizeof target);
+		trail.active = 0;
 	}
 	if (context || moved)
 		trail.moved = now;

@@ -5027,9 +5027,6 @@ xsetmode(int set, unsigned int flags)
 int
 xsetcursor(int cursor)
 {
-	#if CURSOR_TRAIL_PATCH
-	int previous = win.cursor;
-	#endif
 	#if BLINKING_CURSOR_PATCH
 	if (!BETWEEN(cursor, 0, 8)) /* 7-8: st extensions */
 	#else
@@ -5045,10 +5042,10 @@ xsetcursor(int cursor)
 	#else
 	win.cursor = cursor;
 	#endif // DEFAULT_CURSOR_PATCH
-	#if CURSOR_TRAIL_PATCH
-	if (win.cursor != previous)
-		trailreset();
-	#endif
+	/* CURSOR_TRAIL_PATCH: the trail is left alone on purpose. TUIs send
+	 * DECSCUSR to signal a mode change and move the cursor in the same
+	 * write; trailupdate() snaps a shape-only change but still animates the
+	 * accompanying move, so resolving the new shape here would lose it. */
 	#if BLINKING_CURSOR_PATCH
 	cursorblinks = win.cursor == 0 || win.cursor == 1 ||
 	               win.cursor == 3 || win.cursor == 5 ||

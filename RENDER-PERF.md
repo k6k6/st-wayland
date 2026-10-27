@@ -3,6 +3,9 @@
 > 开始：2026-09-22 ｜ 环境：Hyprland 0.52.2，eDP-2 1920×1200@60，scale=1，16 核
 > 目标：降低 st(wayland) 渲染路径的 CPU 开销，并让重绘频率与显示器刷新率对齐。
 > 状态：**第一、二阶段完成（未 commit）**。第二阶段（去 offscreen surface、直接画进 shm buffer）见 §5。
+>
+> **注（2026-10-26）**：当时的 Hyprland 现已替换为 **mangowm**；文中 Hyprland / `hyprctl`
+> 的测量与压测记录均为历史数据，合成器行为需在 mangowm 下重新确认。
 
 ---
 

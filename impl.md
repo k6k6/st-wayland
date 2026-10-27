@@ -3,6 +3,9 @@
 > 对象：st 0.9.3 + 19 个 patch（st-flexipatch 体系）
 > 结果：`x.c`（4082 行）→ `wl.c`（5234 行，163 个函数）；其余文件 diff 约 +1600/−1450 行
 > 环境：Hyprland 0.52 / wayland 1.26 / cairo 1.18 / xkbcommon 1.13 / fcitx5
+>
+> **注（2026-10-26）**：当时的桌面环境 Hyprland 现已替换为 **mangowm**。本文中所有
+> Hyprland / `hyprctl` 相关内容均为当时的记录，不代表当前环境。
 
 ---
 

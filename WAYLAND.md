@@ -3,6 +3,9 @@
 > 日期：2026-09-21 ｜ 环境：Hyprland 0.52.2（`XDG_SESSION_TYPE=wayland`，monitor scale=1）
 > wayland 1.26.0 / wayland-protocols 1.49 / xkbcommon 1.13.2 / cairo 1.18.4（含 cairo-ft）/
 > freetype 26.6.20 / fontconfig 2.18.3 / harfbuzz 14.4.0 / imlib2 1.12.7 / gdlib 2.3.3
+>
+> **注（2026-10-26）**：当时的 Hyprland 现已替换为 **mangowm**。文中所有 Hyprland 实测、
+> `hyprctl` 操作与嵌套无头 Hyprland 的复现步骤均为历史记录，实际验证请用 mangowm 会话。
 
 ## 1. 方案决策（已与用户确认）
 
@@ -116,7 +119,12 @@ static int cursortrailthreshold = 2;          /* 横向或纵向至少移动多�
 - `cursortraildecay` 使用毫秒（kitty 使用秒），两个值应为正数且第二个不小于第一个。
   `{60, 180}` 更利落，`{100, 400}` 更明显。尾迹沿用当前光标颜色。
 - 失焦、隐藏、闪烁的隐藏阶段、输入法 preedit 和滚动历史期间不显示拖尾；
-  屏幕切换、尺寸／字号变化、光标样式变化时重新定位，不拖着旧屏幕飞行。
+  屏幕切换、尺寸／字号变化时重新定位，不拖着旧屏幕飞行。
+- 光标样式变化（DECSCUSR）不算重新定位：Neovim 等 TUI 把 `ESC[6 q`／`ESC[2 q`
+  和同一次模式切换的光标移动写进同一次输出（insert↔normal 通常就是一个
+  单格跳变），此时移动照常拖尾，起手形状仍用旧形状；只有“只换形状、不移动”
+  时才直接归位。这类形状＋移动的组合也不受 `cursortrail` 停留时间和最小位移
+  阈值限制，因为它是用户可见的显式跳变，而不是 TUI 的高频重绘。
 - 动画复用 `wl_surface.frame` 节流，静止后不再唤醒；同步更新期间保持原有绘制暂停。
   每帧重绘上一尾迹覆盖的终端行，恢复连字、文本和 sixel，不留下残影。
 - 这是软件渲染下的近似视觉效果，不实现 kitty 自定义 shader 的火焰／运动模糊。
