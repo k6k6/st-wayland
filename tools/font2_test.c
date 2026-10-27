@@ -39,7 +39,6 @@ checkspares(double ratio)
 	assert(frclen == 4 * (int)LEN(font2));
 	for (int i = 0; i < frclen; i++) {
 		assert(frc[i].flags == flags[i % 4]);
-		assert(frc[i].unicodep == 0);
 		checksize(frc[i].font, sizes[i / 4] * ratio);
 	}
 	if (LEN(font2)) {
@@ -90,6 +89,38 @@ checkfallback(void)
 }
 #endif
 
+static void
+checkboundedresults(void)
+{
+	unsigned int glyph;
+	int before = frclen;
+	for (unsigned int i = 0; i < FALLBACK_RESULTS * 3; i++) {
+		int f = fallbackfont(&dc.font, FRC_NORMAL, 0x100000 + i, &glyph);
+		assert(!glyph && frc[f].flags == FRC_NORMAL);
+		/* Thousands of misses share one actual scaled font. */
+		assert(frclen <= before + 1);
+	}
+	int count = frclen;
+	for (unsigned int i = 0; i < FALLBACK_RESULTS; i++) {
+		FallbackResult *r = &fallbackresults[i];
+		if (r->source) assert(r->index < frclen);
+	}
+	for (int style = FRC_NORMAL; style <= FRC_ITALICBOLD; style++) {
+		Font *fonts[] = {&dc.font, &dc.ifont, &dc.bfont, &dc.ibfont};
+		int f = fallbackfont(fonts[style], style, 0x10ffff, &glyph);
+		assert(!glyph && frc[f].flags == style);
+		assert(fallbackfont(fonts[style], style, 0x10ffff, &glyph) == f && !glyph);
+	}
+	assert(frclen <= count + 3);
+	/* Cached misses must be reconsidered when another font is appended. */
+	int f = fallbackfont(&dc.font, FRC_NORMAL, 'A', &glyph);
+	assert(glyph);
+	unsigned int slot = ('A' * 2654435761u ^ FRC_NORMAL) & (FALLBACK_RESULTS - 1);
+	fallbackresults[slot] = (FallbackResult){.source = &dc.font, .rune = 'A',
+		.index = f, .glyph = 0, .generation = frclen - 1};
+	assert(fallbackfont(&dc.font, FRC_NORMAL, 'A', &glyph) == f && glyph);
+}
+
 int
 main(void)
 {
@@ -112,14 +143,18 @@ main(void)
 	/* No font covers this noncharacter; automatic fallback is cached once. */
 	before = frclen;
 	index = fallbackfont(&dc.font, FRC_NORMAL, 0x10ffff, &glyph);
-	assert(index == before && frclen == before + 1);
+	assert(index <= before && frclen <= before + 1);
 	assert(fallbackfont(&dc.font, FRC_NORMAL, 0x10ffff, &glyph) == index);
-	assert(frclen == before + 1);
+	int loaded = frclen;
+	checkboundedresults();
+	assert(frclen >= loaded);
 
 	/* The common reload path used by zoom and output-scale changes. */
 	for (int i = 0; i < 12; i++) {
 		xunloadfonts();
 		assert(frclen == 0);
+		for (unsigned int j = 0; j < LEN(fallbackresults); j++)
+			assert(fallbackresults[j].source == NULL);
 		for (unsigned int j = 0; j < LEN(glyphcache); j++)
 			assert(glyphcache[j].font == NULL);
 		xw.scale = i % 3 == 0 ? 1.0 : i % 3 == 1 ? 1.25 : 2.0;
@@ -135,6 +170,6 @@ main(void)
 	#if LIGATURES_PATCH
 	hbdestroybuffer();
 	#endif
-	puts("PASS: primary priority, spare order/styles/sizes, fallback cache, zoom/scale/reload");
+	puts("PASS: primary/spare order, styles/sizes, bounded rune misses, font dedup, zoom/scale/reload");
 	return 0;
 }

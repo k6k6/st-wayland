@@ -11,7 +11,6 @@ xloadsparefont(FcPattern *pattern, int flags)
 	frc[frclen].font = spare.match;
 	FcPatternDestroy(spare.pattern);
 	frc[frclen].flags = flags;
-	frc[frclen].unicodep = 0;
 	frclen++;
 
 	return 0;

@@ -146,13 +146,16 @@ select_word() {
 run_case() { # $1 = st binary, $2 = peer mode; echoes "alive" or the exit status
 	"$1" -e sh -c 'for i in $(seq 1 30); do
 		echo "line $i: hello world 0123456789"; done; sleep 120' \
-		2>st.err &
+		> /dev/null 2>st.err &
 	stpid=$!
 	sleep 1.5
 	select_word
 	./selectionpeer "--$2" >peer.out 2>peer.err || true
 	sleep 0.4
 	if kill -0 "$stpid" 2>/dev/null; then
+		kill "$stpid" 2>/dev/null || true
+		wait "$stpid" 2>/dev/null || true
+		stpid=
 		echo alive
 	else
 		# wait already reports the status; "set -e" must not abort here

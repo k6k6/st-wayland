@@ -6,6 +6,10 @@
 >
 > **注（2026-10-26）**：当时的 Hyprland 现已替换为 **mangowm**；文中 Hyprland / `hyprctl`
 > 的测量与压测记录均为历史数据，合成器行为需在 mangowm 下重新确认。
+>
+> **后续优化（2026-10-27）**：SIXEL 像素复用、字体结果缓存、光标行恢复、分散 damage、
+> 剪贴板共享快照及新基准工具见 [OPTIMIZATIONS.md](OPTIMIZATIONS.md)。下文的原始
+> `bench.sh` 用法和脚本内容属于当时记录；当前入口与计量说明见 [tools/bench.md](tools/bench.md)。
 
 ---
 

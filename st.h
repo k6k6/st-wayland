@@ -399,8 +399,12 @@ typedef struct {
 	int gm;           /* geometry mask */
 } XWindow;
 
+typedef struct SelectionSnapshot SelectionSnapshot;
+
 typedef struct {
+	/* Borrowed, read-only views for selection consumers in patches. */
 	char *primary, *clipboard;
+	SelectionSnapshot *primary_snapshot, *clipboard_snapshot;
 	struct timespec tclick1;
 	struct timespec tclick2;
 	struct wl_data_source *clipsource;

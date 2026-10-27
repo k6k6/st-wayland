@@ -19,6 +19,8 @@ cp "$root/tools/font2_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
 packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+cflags=${CFLAGS:--O1 -g}
+ldflags=${LDFLAGS:-}
 
 for variant in off empty multi multi-no-ligatures; do
 	python3 - "$variant" <<'PY'
@@ -41,15 +43,15 @@ config, count = re.subn(r'(static char \*font2\[\] = \{).*?(\};)', lambda m: m[1
 assert count == 1
 Path('config.h').write_text(config)
 PY
-	if ! make -s -j2 CFLAGS='-O1 -g' LDFLAGS='' >"build-$variant.log" 2>&1; then
+	if ! make -s -j2 CFLAGS="$cflags" LDFLAGS="$ldflags" >"build-$variant.log" 2>&1; then
 		cat "build-$variant.log" >&2
 		exit 1
 	fi
 	# Deliberately exclude wl.o: the harness includes the real wl.c itself.
-	${CC:-cc} -O1 -g -DVERSION=\"test\" -Iprotocols \
+	${CC:-cc} $cflags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/font2_test.c \
 		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
-		$(pkg-config --libs $packages) -lm -lutil -lrt -o font2-test
+		$ldflags $(pkg-config --libs $packages) -lm -lutil -lrt -o font2-test
 	printf '%s: ' "$variant"
 	./font2-test
 done

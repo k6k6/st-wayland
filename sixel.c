@@ -10,7 +10,7 @@
 #include "sixel.h"
 #include "sixel_hls.h"
 
-#define SIXEL_RGB(r, g, b) ((255 << 24) + ((r) << 16) + ((g) << 8) +  (b))
+#define SIXEL_RGB(r, g, b) (0xff000000u | ((unsigned int)(r) << 16) | ((unsigned int)(g) << 8) | (unsigned int)(b))
 #define SIXEL_PALVAL(n,a,m) (((n) * (a) + ((m) / 2)) / (m))
 #define SIXEL_XRGB(r,g,b) SIXEL_RGB(SIXEL_PALVAL(r, 255, 100), SIXEL_PALVAL(g, 255, 100), SIXEL_PALVAL(b, 255, 100))
 

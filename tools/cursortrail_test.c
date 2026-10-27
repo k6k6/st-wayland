@@ -260,8 +260,14 @@ pixelsandcleanup(void)
 	#endif
 	clearbuffer(); jump(); paint(130);
 	assert(trail.painted && trailneedsframe());
-	assert(buffers[0].dx1 <= trail.x1 && buffers[0].dy1 <= trail.y1);
-	assert(buffers[0].dx2 >= trail.x2 && buffers[0].dy2 >= trail.y2);
+	int damaged = 0;
+	for (unsigned int i = 0; i < buffers[0].damage.count; i++) {
+		DamageRect r = buffers[0].damage.rects[i];
+		if (r.x1 <= trail.x1 && r.y1 <= trail.y1 &&
+		    r.x2 >= trail.x2 && r.y2 >= trail.y2)
+			damaged = 1;
+	}
+	assert(damaged);
 	for (int y = 0; y < win.h; y++) {
 		for (int x = 0; x < win.w; x++) {
 			int target = x >= bw + 14 * win.cw && x < bw + 15 * win.cw &&
@@ -300,7 +306,7 @@ finishfake(void)
 {
 	cairo_surface_flush(xw.buf);
 	lastbuf = curbuf;
-	lastbuf->dx1 = lastbuf->dy1 = lastbuf->dx2 = lastbuf->dy2 = 0;
+	damageclear(&lastbuf->damage);
 	curbuf = NULL; xw.buf = NULL; xw.draw = NULL;
 }
 
@@ -393,7 +399,7 @@ main(void)
 		b->surface = cairo_image_surface_create_for_data(b->data,
 			CAIRO_FORMAT_ARGB32, win.w, win.h, b->stride);
 		b->cr = cairo_create(b->surface);
-		b->dx1 = b->dy1 = 0; b->dx2 = win.w; b->dy2 = win.h;
+		damageadd(&b->damage, (DamageRect){0, 0, win.w, win.h});
 	}
 	/* The unused slot also has a sentinel, so shortage tests never allocate. */
 	buffers[2].buffer = (struct wl_buffer *)(uintptr_t)1;
@@ -406,7 +412,7 @@ main(void)
 	}
 	free(xw.specbuf);
 	#if LIGATURES_PATCH
-	free(xw.specseq); hbdestroybuffer();
+	free(xw.specseq); free(restoredrows); hbdestroybuffer();
 	#endif
 	xunloadfonts(); free(frc); free(dc.col);
 	cairo_debug_reset_static_data(); FcFini();

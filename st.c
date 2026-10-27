@@ -1081,8 +1081,8 @@ tattrset(int attr)
 {
 	int i, j;
 
-	for (i = 0; i < term.row-1; i++) {
-		for (j = 0; j < term.col-1; j++) {
+	for (i = 0; i < term.row; i++) {
+		for (j = 0; j < term.col; j++) {
 			if (term.line[i][j].mode & attr)
 				return 1;
 		}
@@ -1117,8 +1117,8 @@ tsetdirtattr(int attr)
 {
 	int i, j;
 
-	for (i = 0; i < term.row-1; i++) {
-		for (j = 0; j < term.col-1; j++) {
+	for (i = 0; i < term.row; i++) {
+		for (j = 0; j < term.col; j++) {
 			if (term.line[i][j].mode & attr) {
 				#if REFLOW_PATCH
 				term.dirty[i] = 1;
@@ -3223,7 +3223,8 @@ tcontrolcode(uchar ascii)
 void
 dcshandle(void)
 {
-	int bgcolor, transparent;
+	sixel_color_t bgcolor;
+	int transparent;
 	unsigned char r, g, b, a = 255;
 
 	switch (csiescseq.mode[0]) {
@@ -3255,8 +3256,8 @@ dcshandle(void)
 			if (term.c.attr.bg == defaultbg)
 				a = dc.col[defaultbg].pixel >> 24 & 255;
 		}
-		bgcolor = a << 24 | r << 16 | g << 8 | b;
-		if (sixel_parser_init(&sixel_st, transparent, (255 << 24), bgcolor, 1, win.cw, win.ch) != 0)
+		bgcolor = (uint32_t)a << 24 | (uint32_t)r << 16 | (uint32_t)g << 8 | b;
+		if (sixel_parser_init(&sixel_st, transparent, 0xff000000u, bgcolor, 1, win.cw, win.ch) != 0)
 			perror("sixel_parser_init() failed");
 		term.mode |= MODE_SIXEL;
 		break;
