@@ -197,6 +197,13 @@
  */
 #define FIXKEYBOARDINPUT_PATCH 1
 
+/* Kitty keyboard protocol, negotiated by applications with CSI > flags u.
+ * Implements progressive enhancement flags 1 (disambiguate), 2 (event types)
+ * and 8 (all keys as escape codes). Legacy encoding is used while flags are 0.
+ * https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+ */
+#define KITTY_KEYBOARD_PATCH 1
+
 /* This patch allows you to add spare font besides the default. Some glyphs can be not present in
  * the default font. For this glyphs st uses font-config and try to find them in font cache first.
  * This patch append fonts defined in font2 variable to the beginning of the font cache.

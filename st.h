@@ -477,6 +477,9 @@ void toggleprinter(const Arg *);
 
 int tattrset(int);
 int tisaltscr(void);
+#if KITTY_KEYBOARD_PATCH
+int tkittykbdflags(void);
+#endif // KITTY_KEYBOARD_PATCH
 void tnew(int, int);
 void tresize(int, int);
 void tsetdirtattr(int);

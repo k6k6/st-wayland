@@ -5,7 +5,7 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static char* font = "Maple Mono NF CN:size=11:antialias=true:autohint=true";
+static char* font = "Maple Mono NF CN:size=11:antialias=true:autohint=false";
 #if FONT2_PATCH
 /* Spare fonts */
 static char* font2[] = {
@@ -117,9 +117,9 @@ static unsigned int cursorthickness = 2;
 
 #if CURSOR_TRAIL_PATCH
 /* Kitty-style trail: 0 disables; otherwise minimum cursor dwell in ms. */
-static unsigned int cursortrail = 40;
+static unsigned int cursortrail = 100;
 /* Fastest/slowest corner decay in ms (positive, slow >= fast). */
-static double cursortraildecay[2] = {100, 300};
+static double cursortraildecay[2] = {80, 300};
 /* Minimum horizontal OR vertical move in cells; 2 skips ordinary typing. */
 static int cursortrailthreshold = 2;
 #endif
@@ -426,19 +426,19 @@ static Shortcut shortcuts[] = {
     /* Ctrl+Shift + +/-/0 动态调整字体大小 (步长 1.0pt)
      * 注意: 主键盘的 + 实际是 Shift+=，- 按住 Shift 会变成 _ ,
      * 所以 plus/equal、minus/underscore 都要绑，否则按住 Shift 时识别不到 */
-    {TERMMOD, XKB_KEY_plus, zoom, {.f = +0.5}},
-    {TERMMOD, XKB_KEY_equal, zoom, {.f = +0.5}},
-    {TERMMOD, XKB_KEY_KP_Add, zoom, {.f = +0.5}},
-    {TERMMOD, XKB_KEY_minus, zoom, {.f = -0.5}},
-    {TERMMOD, XKB_KEY_underscore, zoom, {.f = -0.5}},
-    {TERMMOD, XKB_KEY_KP_Subtract, zoom, {.f = -0.5}},
+    {MODKEY|ShiftMask, XKB_KEY_plus, zoom, {.f = +0.5}},
+    // {TERMMOD, XKB_KEY_equal, zoom, {.f = +0.5}},
+    // {TERMMOD, XKB_KEY_KP_Add, zoom, {.f = +0.5}},
+    // {TERMMOD, XKB_KEY_minus, zoom, {.f = -0.5}},
+    {MODKEY|ShiftMask, XKB_KEY_underscore, zoom, {.f = -0.5}},
+    // {TERMMOD, XKB_KEY_KP_Subtract, zoom, {.f = -0.5}},
     {TERMMOD, XKB_KEY_0, zoomreset, {.f = 0}},
     {TERMMOD, XKB_KEY_C, clipcopy, {.i = 0}},
     // { ControlMask,          XKB_KEY_v,           externalpipein,  {.v =  pasteimgcmd} },
     {TERMMOD, XKB_KEY_V, clippaste, {.i = 0}},
 #if ALPHA_PATCH
-    {TERMMOD, XKB_KEY_O, changealpha, {.f = +0.05}},
-    {TERMMOD, XKB_KEY_P, changealpha, {.f = -0.05}},
+    // {TERMMOD, XKB_KEY_O, changealpha, {.f = +0.05}},
+    // {TERMMOD, XKB_KEY_P, changealpha, {.f = -0.05}},
   #if ALPHA_FOCUS_HIGHLIGHT_PATCH
   //{ TERMMOD,              XKB_KEY_,           changealphaunfocused, {.f = +0.05} },
   //{ TERMMOD,              XKB_KEY_,           changealphaunfocused, {.f = -0.05} },

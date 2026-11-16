@@ -247,6 +247,14 @@ static ssize_t xwrite(int, const char *, size_t);
 /* Globals */
 static Selection sel;
 static CSIEscape csiescseq;
+#if KITTY_KEYBOARD_PATCH
+/* kitty keyboard protocol: current flags and stack, per screen */
+#define KITTYKBD_STACK 16
+#define KITTYKBD_FLAGS 11 /* 1 disambiguate, 2 event types, 8 all keys */
+static struct KittyKbd {
+	uchar flags, depth, stack[KITTYKBD_STACK];
+} kittykbd[2];
+#endif // KITTY_KEYBOARD_PATCH
 static STREscape strescseq;
 static int iofd = 1;
 static int cmdfd;
@@ -1175,6 +1183,50 @@ tresetcursor(void)
 	                    .x = 0, .y = 0, .state = CURSOR_DEFAULT };
 }
 
+#if KITTY_KEYBOARD_PATCH
+int
+tkittykbdflags(void)
+{
+	return kittykbd[IS_SET(MODE_ALTSCREEN) != 0].flags;
+}
+
+/* CSI > flags u (push), CSI < count u (pop), CSI = flags ; mode u (set) */
+static int
+tkittykbdctl(void)
+{
+	char *end, op = csiescseq.buf[0];
+	long a, b = 1;
+	int i;
+	struct KittyKbd *k = &kittykbd[IS_SET(MODE_ALTSCREEN) != 0];
+
+	if (!strchr("<=>", op) || csiescseq.buf[csiescseq.len-1] != 'u')
+		return 0;
+	a = strtol(csiescseq.buf + 1, &end, 10);
+	if (*end == ';')
+		b = strtol(end + 1, &end, 10);
+	if (*end != 'u')
+		return 0;
+	if (op == '>') {
+		if (k->depth == KITTYKBD_STACK)
+			memmove(k->stack, k->stack + 1, --k->depth);
+		k->stack[k->depth++] = k->flags;
+		k->flags = a & KITTYKBD_FLAGS;
+	} else if (op == '<') {
+		for (i = MAX(a, 1); i > 0 && k->depth > 0; i--)
+			k->flags = k->stack[--k->depth];
+		if (i > 0)
+			k->flags = 0;
+	} else if (b == 2) {
+		k->flags |= a & KITTYKBD_FLAGS;
+	} else if (b == 3) {
+		k->flags &= ~a;
+	} else {
+		k->flags = a & KITTYKBD_FLAGS;
+	}
+	return 1;
+}
+#endif // KITTY_KEYBOARD_PATCH
+
 void
 treset(void)
 {
@@ -1184,6 +1236,9 @@ treset(void)
 	#endif // REFLOW_PATCH
 
 	tresetcursor();
+	#if KITTY_KEYBOARD_PATCH
+	memset(kittykbd, 0, sizeof(kittykbd));
+	#endif // KITTY_KEYBOARD_PATCH
 
 	memset(term.tabs, 0, term.col * sizeof(*term.tabs));
 	for (i = tabspaces; i < term.col; i += tabspaces)
@@ -2111,6 +2166,11 @@ csihandle(void)
 	int maxcol = term.col;
 	#endif // COLUMNS_PATCH
 
+	#if KITTY_KEYBOARD_PATCH
+	if (tkittykbdctl())
+		return;
+	#endif // KITTY_KEYBOARD_PATCH
+
 	switch (csiescseq.mode[0]) {
 	default:
 	unknown:
@@ -2551,7 +2611,16 @@ csihandle(void)
 	#endif // CSI_22_23_PATCH | SIXEL_PATCH
 	case 'u': /* DECRC -- Restore cursor position (ANSI.SYS) */
 		if (csiescseq.priv) {
+			#if KITTY_KEYBOARD_PATCH
+			/* query the kitty keyboard protocol flags */
+			if (csiescseq.len != 2)
+				goto unknown;
+			n = snprintf(buffer, sizeof buffer, "\033[?%du",
+					tkittykbdflags());
+			ttywrite(buffer, n, 0);
+			#else
 			goto unknown;
+			#endif // KITTY_KEYBOARD_PATCH
 		} else {
 			tcursor(CURSOR_LOAD);
 		}

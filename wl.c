@@ -171,6 +171,10 @@ static int evcol(MouseEvent *);
 static int evrow(MouseEvent *);
 
 static void kpress(xkb_keycode_t);
+#if KITTY_KEYBOARD_PATCH
+static void kittyrelease(xkb_keycode_t);
+static void kittyreset(void);
+#endif // KITTY_KEYBOARD_PATCH
 static uint buttonmask(uint);
 static void brelease(MouseEvent *);
 static void bpress(MouseEvent *);
@@ -2810,6 +2814,9 @@ focusout(void)
 	}
 	#endif // ALPHA_FOCUS_HIGHLIGHT_PATCH
 	kbrepeat.active = 0;
+	#if KITTY_KEYBOARD_PATCH
+	kittyreset();
+	#endif // KITTY_KEYBOARD_PATCH
 	wlevents++;
 }
 
@@ -2850,8 +2857,12 @@ keyboard_key(void *data, struct wl_keyboard *kbd, uint32_t serial, uint32_t time
 				kbrepeat.next.tv_sec++;
 			}
 		}
-	} else if (kbrepeat.active && kbrepeat.key == keycode) {
-		kbrepeat.active = 0;
+	} else {
+		if (kbrepeat.active && kbrepeat.key == keycode)
+			kbrepeat.active = 0;
+		#if KITTY_KEYBOARD_PATCH
+		kittyrelease(keycode);
+		#endif // KITTY_KEYBOARD_PATCH
 	}
 }
 
@@ -5262,6 +5273,10 @@ xbell(void)
 	#endif // VISUALBELL_1_PATCH
 }
 
+#if KITTY_KEYBOARD_PATCH
+#include "patch/kittykbd.c"
+#endif // KITTY_KEYBOARD_PATCH
+
 int
 match(uint mask, uint state)
 {
@@ -5388,6 +5403,12 @@ kpress(xkb_keycode_t keycode)
 		}
 	}
 
+	#if KITTY_KEYBOARD_PATCH
+	/* an application that negotiated the kitty protocol gets all the rest */
+	if (kittykey(keycode, ksym, state, buf, len, kittyevent))
+		return;
+	#endif // KITTY_KEYBOARD_PATCH
+
 	/* 2. custom keys from config.h */
 	if ((customkey = kmap(ksym, state))) {
 		ttywrite(customkey, strlen(customkey), 1);
@@ -5433,7 +5454,13 @@ repeatkey(struct timespec *now)
 		return;
 	if (TIMEDIFF((*now), kbrepeat.next) < 0)
 		return;
+	#if KITTY_KEYBOARD_PATCH
+	kittyevent = KK_REPEAT;
 	kpress(kbrepeat.key);
+	kittyevent = KK_PRESS;
+	#else
+	kpress(kbrepeat.key);
+	#endif // KITTY_KEYBOARD_PATCH
 	wlevents++;
 	interval = 1000000000L / kbrepeat.rate;
 	kbrepeat.next.tv_nsec += interval;
