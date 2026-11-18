@@ -71,6 +71,16 @@ jump(void)
 }
 
 static void
+settled(void)
+{
+	assert(!trail.active && !trailneedsframe());
+	for (int i = 0; i < 4; i++) {
+		assert(fabs(trail.corner[i].x - trail.target[i].x) < 0.5);
+		assert(fabs(trail.corner[i].y - trail.target[i].y) < 0.5);
+	}
+}
+
+static void
 timing(void)
 {
 	TrailPoint expected[4];
@@ -83,41 +93,47 @@ timing(void)
 	assert(!trail.active);
 	update(17, 2, 220, blank);
 	assert(trail.active);
-	/* Moving right: leading (right) corners arrive sooner. */
-	assert(trail.duration[1] == 100 && trail.duration[0] == 400);
 	advance(320);
-	assert(trail.corner[1].x == trail.target[1].x);
-	assert(trail.corner[0].x < trail.target[0].x);
-	advance(620);
-	assert(!trail.active && !trailneedsframe());
-	for (int i = 0; i < 4; i++) {
-		assert(trail.corner[i].x == trail.target[i].x);
-		assert(trail.corner[i].y == trail.target[i].y);
-	}
+	/* Leading corners converge faster, without a fixed arrival time. */
+	assert(fabs(trail.corner[1].x - trail.target[1].x) < 0.5);
+	assert(trail.target[0].x - trail.corner[0].x > 0.5);
+	advance(620); settled();
 	fresh(); update(2, 2, 0, blank); update(2, 4, 100, blank);
 	assert(trail.active); /* Per-axis threshold, also vertical. */
 	fresh(); cursortrail = 0;
 	update(2, 2, 0, blank); update(20, 8, 100, blank);
 	assert(!trail.valid && !trailneedsframe());
 
-	jump(); advance(250);
+	jump(); advance(150);
 	memcpy(expected, trail.corner, sizeof expected);
-	jump();
-	for (int i = 101; i <= 250; i++) advance(i);
+	/* Chase a new target from the last rendered positions, retaining the
+	 * frame clock rather than restarting a fixed-duration interpolation. */
+	update(1, 8, 160, blank);
+	assert(trail.active && !memcmp(trail.corner, expected, sizeof expected));
+	assert(trail.updated.tv_nsec == stamp(150).tv_nsec);
+	advance(176);
+	assert(memcmp(trail.corner, expected, sizeof expected));
+	advance(800); settled();
+
+	/* With equal decays the exponential is independent of frame partition. */
+	jump(); cursortraildecay[0] = cursortraildecay[1] = 400;
+	advance(250); memcpy(expected, trail.corner, sizeof expected);
+	jump(); cursortraildecay[0] = cursortraildecay[1] = 400;
+	for (int i = 110; i <= 250; i += 10) advance(i);
 	for (int i = 0; i < 4; i++) {
-		assert(fabs(trail.corner[i].x - expected[i].x) < 1e-9);
-		assert(fabs(trail.corner[i].y - expected[i].y) < 1e-9);
+		assert(fabs(trail.corner[i].x - expected[i].x) < 0.0001);
+		assert(fabs(trail.corner[i].y - expected[i].y) < 0.0001);
 	}
-	/* Retarget in flight starts at the interpolated location, with no jump. */
-	update(1, 8, 250, blank);
-	assert(trail.active);
-	assert(!memcmp(trail.from, expected, sizeof expected));
-	advance(650);
-	assert(!trail.active);
+	/* A long dwell does not consume an animation before its first frame. */
+	fresh(); update(2, 2, 0, blank);
+	memcpy(expected, trail.corner, sizeof expected);
+	update(14, 2, 10000, blank); advance(10000);
+	assert(trail.active && !memcmp(trail.corner, expected, sizeof expected));
+	advance(10016); assert(memcmp(trail.corner, expected, sizeof expected));
+
 	fresh(); cursortraildecay[0] = NAN; cursortraildecay[1] = -10;
 	update(2, 2, 0, blank); update(14, 2, 100, blank);
-	for (int i = 0; i < 4; i++) assert(trail.duration[i] == 100);
-	advance(200); assert(!trail.active);
+	advance(200); settled();
 }
 
 static void
@@ -185,8 +201,8 @@ screenentry(void)
 	update(6, 1, 10, blank); /* dwell 10 ms < cursortrail 40: skip guard */
 	assert(trail.active && trailneedsframe() && trail.screen == otherlines);
 	for (i = 0; i < 4; i++) {
-		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
-		assert(fabs(trail.from[i].y - old[i].y) < 1e-9);
+		assert(fabs(trail.corner[i].x - old[i].x) < 1e-9);
+		assert(fabs(trail.corner[i].y - old[i].y) < 1e-9);
 	}
 	advance(600);
 	assert(!trail.active && !trailneedsframe());
@@ -199,7 +215,7 @@ screenentry(void)
 	update(6, 4, 200, blank);
 	assert(trail.active);
 	for (i = 0; i < 4; i++)
-		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
+		assert(fabs(trail.corner[i].x - old[i].x) < 1e-9);
 	advance(600);
 	assert(!trail.active);
 
@@ -210,7 +226,7 @@ screenentry(void)
 	update(3, 9, 20, blank);
 	assert(trail.active && trail.screen == otherlines);
 	for (i = 0; i < 4; i++)
-		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
+		assert(fabs(trail.corner[i].x - old[i].x) < 1e-9);
 	advance(600);
 	assert(!trail.active);
 
@@ -230,8 +246,8 @@ screenentry(void)
 	update(20, 3, 100, blank);
 	assert(trail.active && trailneedsframe());
 	for (i = 0; i < 4; i++) {
-		assert(fabs(trail.from[i].x - old[i].x) < 1e-9);
-		assert(fabs(trail.from[i].y - old[i].y) < 1e-9);
+		assert(fabs(trail.corner[i].x - old[i].x) < 1e-9);
+		assert(fabs(trail.corner[i].y - old[i].y) < 1e-9);
 	}
 	advance(600);
 	assert(!trail.active);
@@ -256,37 +272,36 @@ restyles(void)
 	update(ox - 1, oy, 200, blank);
 	assert(trail.active && trailneedsframe());
 	for (i = 0; i < 4; i++) {
-		assert(fabs(trail.from[i].x - bar[i].x) < 1e-9);
-		assert(fabs(trail.from[i].y - bar[i].y) < 1e-9);
+		assert(fabs(trail.corner[i].x - bar[i].x) < 1e-9);
+		assert(fabs(trail.corner[i].y - bar[i].y) < 1e-9);
 	}
 	/* Bar -> block: the new target is one full cell wide, one cell left. */
 	assert(trail.target[1].x - trail.target[0].x == win.cw);
 	assert(trail.target[2].y - trail.target[1].y == win.ch);
 	advance(300);
-	/* Moving left: the leading (left) corners have arrived, the trailing
-	 * right edge is still collapsing from the bar width onto the block. */
-	assert(trail.corner[0].x == trail.target[0].x);
-	assert(trail.corner[0].x == bar[0].x - win.cw);
+	/* Moving left: leading corners converge sooner than the trailing edge. */
+	assert(fabs(trail.corner[0].x - trail.target[0].x) < 0.5);
+	assert(fabs(trail.corner[0].x - (bar[0].x - win.cw)) < 0.5);
 	assert(trail.corner[1].x > trail.target[1].x);
 	assert(trail.corner[1].x <= bar[1].x);
 	advance(600);
 	assert(!trail.active && !trailneedsframe());
 	for (i = 0; i < 4; i++) {
-		assert(trail.corner[i].x == trail.target[i].x);
-		assert(trail.corner[i].y == trail.target[i].y);
+		assert(fabs(trail.corner[i].x - trail.target[i].x) < 0.5);
+		assert(fabs(trail.corner[i].y - trail.target[i].y) < 0.5);
 	}
 
 	/* The reverse direction: block -> bar, moving right. */
 	assert(!xsetcursor(6));
 	update(ox, oy, 900, blank);
 	assert(trail.active);
-	assert(trail.from[2].y - trail.from[1].y == win.ch);
+	assert(fabs(trail.corner[2].y - trail.corner[1].y - win.ch) < 0.0001);
 	assert(trail.target[1].x - trail.target[0].x == cursorthickness);
 	advance(1300);
 	assert(!trail.active);
 	for (i = 0; i < 4; i++) {
-		assert(trail.corner[i].x == trail.target[i].x);
-		assert(trail.corner[i].y == trail.target[i].y);
+		assert(fabs(trail.corner[i].x - trail.target[i].x) < 0.5);
+		assert(fabs(trail.corner[i].y - trail.target[i].y) < 0.5);
 	}
 
 	/* A shape-only change draws no trail, but must not stall a later move. */
@@ -368,6 +383,144 @@ pixelsandcleanup(void)
 	/* Settle after a painted frame: exactly one restoration, then idle. */
 	jump(); paint(130); trailprepare(); update(14, 6, 500, blank); paint(500);
 	assert(!trail.active && !trail.painted && !trailneedsframe());
+}
+
+#ifdef CURSORTRAIL_KITTY_REFERENCE
+#include "cursortrail-reference.h"
+
+static void
+kittyreference(void)
+{
+	const int map[] = {1, 2, 3, 0}; /* kitty TR BR BL TL -> st TL TR BR BL */
+	const long periods[] = {16666667, 6944444, 11000000};
+	const int targets[][2] = {{20, 2}, {2, 8}, {20, 8}};
+	const int widths[] = {win.w, 1920, 1080}, heights[] = {win.h, 1080, 1920};
+	int savedw = win.w, savedh = win.h, frames = 0;
+	double maxerror = 0;
+	KittyReferenceScreen screen = {
+		.cell_size = {win.cw, win.ch}, .modes = {true}
+	};
+	KittyReferenceWindow window = {.render_data = {&screen}};
+	KittyReferenceOSWindow os = {0};
+
+	for (int aspect = 0; aspect < 3; aspect++) {
+		win.w = widths[aspect]; win.h = heights[aspect];
+		for (int shape = 2; shape <= 6; shape += 2)
+		for (int rate = 0; rate < 3; rate++)
+		for (int move = 0; move < 3; move++) {
+			fresh(); win.cursor = shape;
+			update(2, 2, 0, blank);
+			update(targets[move][0], targets[move][1], 100, blank);
+			KittyReferenceTrail ref = {.opacity = 1, .needs_render = true,
+				.updated_at = 100100000000LL};
+			for (int i = 0; i < 4; i++) {
+				ref.corner_x[i] = -1.f + (float)trail.corner[map[i]].x * (2.f / win.w);
+				ref.corner_y[i] = 1.f - (float)trail.corner[map[i]].y * (2.f / win.h);
+			}
+			kitty_reference_options.cursor_trail_decay_fast = cursortraildecay[0] / 1000;
+			kitty_reference_options.cursor_trail_decay_slow = cursortraildecay[1] / 1000;
+			int64_t ns = 100100000000LL;
+			for (int frame = 0; frame < 200; frame++) {
+				/* The third schedule deliberately varies frame intervals. */
+				ns += periods[rate] + (rate == 2 ? (frame % 3) * 4000000 : 0);
+				struct timespec now = {.tv_sec = ns / 1000000000,
+					.tv_nsec = ns % 1000000000};
+				if (frame == 3 || frame == 7) {
+					/* Mid-flight reversal and another turn; keep both clocks. */
+					trailupdate(frame == 3 ? 3 : 18, frame == 3 ? 7 : 3,
+						blank, red, &now);
+				}
+				ref.cursor_edge_x[0] = -1.f + (float)trail.target[0].x * (2.f / win.w);
+				ref.cursor_edge_x[1] = -1.f + (float)trail.target[2].x * (2.f / win.w);
+				ref.cursor_edge_y[0] = 1.f - (float)trail.target[0].y * (2.f / win.h);
+				ref.cursor_edge_y[1] = 1.f - (float)trail.target[2].y * (2.f / win.h);
+				ndc_coords g = {.dx = 2.f * win.cw / win.w,
+					.dy = 2.f * win.ch / win.h};
+				update_cursor_trail_corners(&ref, g, ns, &os, &window);
+				ref.updated_at = ns;
+				update_cursor_trail_needs_render(&ref, &window, g);
+				trailadvance(&now);
+				for (int i = 0; i < 4; i++) {
+					double x = (ref.corner_x[i] + 1.f) * (win.w / 2.0);
+					double y = (1.f - ref.corner_y[i]) * (win.h / 2.0);
+					double error = MAX(fabs(trail.corner[map[i]].x - x),
+						fabs(trail.corner[map[i]].y - y));
+					maxerror = MAX(error, maxerror);
+					if (error >= 0.001)
+						fprintf(stderr, "reference mismatch aspect=%d shape=%d rate=%d move=%d frame=%d corner=%d error=%.9f st=(%.9f,%.9f) kitty=(%.9f,%.9f)\n",
+							aspect, shape, rate, move, frame, i, error,
+							trail.corner[map[i]].x, trail.corner[map[i]].y, x, y);
+					assert(error < 0.001);
+				}
+				assert(trail.active == ref.needs_render);
+				frames++;
+				if (!trail.active) break;
+			}
+			assert(!trail.active);
+		}
+	}
+	win.w = savedw; win.h = savedh;
+	printf("kitty source %s: %d frames, max corner error %.6f px; ",
+		KITTY_REFERENCE_SHA, frames, maxerror);
+}
+#endif
+
+static void
+quadpixels(void)
+{
+	int bw = borderpx, bh = borderpx;
+	#if ANYSIZE_PATCH
+	bw = win.hborderpx; bh = win.vborderpx;
+	#endif
+	/* A detached moving rectangle must not gain a bridge to the target. */
+	fresh(); update(20, 5, 0, blank);
+	for (int i = 0; i < 4; i++) trail.corner[i].x -= 8 * win.cw;
+	trail.active = 1; trail.updated = stamp(100);
+	trail.color.color.alpha = 0x2000;
+	clearbuffer(); paint(100);
+	assert(pixel(bw + 12 * win.cw + win.cw / 2, bh + 5 * win.ch + win.ch / 2) == red.pixel);
+	assert(pixel(bw + 17 * win.cw, bh + 5 * win.ch + win.ch / 2) == 0xff112233);
+	assert(trail.x2 < trail.target[0].x);
+
+	/* Even a two-pixel residual stays opaque; background/source alpha and
+	 * distance no longer attenuate it. The live cursor itself stays masked. */
+	fresh(); update(10, 5, 0, blank);
+	for (int i = 0; i < 4; i++) trail.corner[i].x -= 2;
+	trail.active = 1; trail.updated = stamp(100);
+	trail.color.color.alpha = 0x2000;
+	clearbuffer(); paint(100);
+	assert(pixel(trail.target[0].x - 1, bh + 5 * win.ch + win.ch / 2) == red.pixel);
+	assert(pixel(trail.target[0].x + 1, bh + 5 * win.ch + win.ch / 2) == 0xff112233);
+
+	/* A thin cursor masks its rectangle, allowing a tail to cross other
+	 * pixels of the same cell. Test both beam and underline. */
+	fresh(); win.cursor = 6; update(10, 5, 0, blank);
+	for (int i = 0; i < 4; i++)
+		trail.corner[i].x = trail.target[0].x + ((i == 1 || i == 2) ? win.cw / 2 : -win.cw / 2);
+	trail.active = 1; trail.updated = stamp(100);
+	clearbuffer(); paint(100);
+	assert(pixel(bw + 10 * win.cw + cursorthickness + 1, bh + 5 * win.ch + win.ch / 2) == red.pixel);
+	assert(pixel(bw + 10 * win.cw, bh + 5 * win.ch + win.ch / 2) == 0xff112233);
+
+	fresh(); win.cursor = 4; update(10, 5, 0, blank);
+	trail.corner[0].y -= win.ch / 2; trail.corner[1].y -= win.ch / 2;
+	trail.active = 1; trail.updated = stamp(100);
+	clearbuffer(); paint(100);
+	assert(pixel(bw + 10 * win.cw + win.cw / 2, trail.target[0].y - 2) == red.pixel);
+	assert(pixel(bw + 10 * win.cw + win.cw / 2, trail.target[0].y) == 0xff112233);
+
+	/* A folded quad is the union of kitty's two fan triangles, not an
+	 * even-odd polygon that punches a hole in their overlap. */
+	fresh(); update(20, 5, 0, blank);
+	double x = bw + 4 * win.cw, y = bh + 3 * win.ch, size = 3 * win.cw;
+	trail.corner[0] = (TrailPoint){x, y};
+	trail.corner[1] = (TrailPoint){x + size, y + size};
+	trail.corner[2] = (TrailPoint){x + size, y};
+	trail.corner[3] = (TrailPoint){x, y + size};
+	trail.active = 1; trail.updated = stamp(100);
+	clearbuffer(); paint(100);
+	assert(pixel(x + 2 * size / 3, y + 3 * size / 4) == red.pixel);
+	assert(pixel(x + size / 5, y + size / 10) == 0xff112233);
 }
 
 static void
@@ -486,7 +639,10 @@ main(void)
 	buffers[2].width = win.w; buffers[2].height = win.h; buffers[2].busy = 1;
 	fresh(); assert(xstartdraw());
 	timing(); contexts(); screenentry(); restyles(); shapes();
-	pixelsandcleanup(); restoration();
+	pixelsandcleanup(); quadpixels(); restoration();
+	#ifdef CURSORTRAIL_KITTY_REFERENCE
+	kittyreference();
+	#endif
 	for (int i = 0; i < 2; i++) {
 		cairo_destroy(buffers[i].cr); cairo_surface_destroy(buffers[i].surface);
 		free(buffers[i].data);
@@ -497,7 +653,7 @@ main(void)
 	#endif
 	xunloadfonts(); free(frc); free(dc.col);
 	cairo_debug_reset_static_data(); FcFini();
-	puts("PASS: trigger/easing/retarget, styles/contexts, TUI screen entry, "
+	puts("PASS: exponential chase/retarget, quad/opacity, styles/contexts, TUI screen entry, "
 	     "mode-switch retarget, pixels/clipping/damage, text/ligature restoration, "
 	     "buffer rotation/shortage, idle");
 	return 0;

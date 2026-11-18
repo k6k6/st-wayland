@@ -119,7 +119,7 @@ static unsigned int cursorthickness = 2;
 /* Kitty-style trail: 0 disables; otherwise minimum cursor dwell in ms. */
 static unsigned int cursortrail = 100;
 /* Fastest/slowest corner decay in ms (positive, slow >= fast). */
-static double cursortraildecay[2] = {80, 300};
+static double cursortraildecay[2] = {100, 300};
 /* Minimum horizontal OR vertical move in cells; 2 skips ordinary typing. */
 static int cursortrailthreshold = 2;
 #endif
@@ -173,7 +173,7 @@ unsigned int tabspaces = 8;
 
 #if ALPHA_PATCH
 /* bg opacity */
-float alpha = 0.8;
+float alpha = 0.85;
   #if ALPHA_GRADIENT_PATCH
 float grad_alpha = 0.54;  // alpha value that'll change
 float stat_alpha = 0.46;  // constant alpha value that'll get added to grad_alpha

@@ -12,6 +12,17 @@ cp "$root/tools/cursortrail_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
 packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+# Optional exact reference: compile functions from the local kitty checkout.
+# Missing checkout skips only this comparison, never the renderer regressions.
+kitty_source=${KITTY_SOURCE:-"$root/../kitty"}
+reference_flags=
+if [ -f "$kitty_source/kitty/cursor_trail.c" ]; then
+	python3 "$root/tools/cursortrail_reference.py" "$kitty_source" \
+		"$work/tools/cursortrail-reference.h"
+	reference_flags=-DCURSORTRAIL_KITTY_REFERENCE=1
+else
+	printf '%s\n' "SKIP: kitty source comparison ($kitty_source/kitty/cursor_trail.c missing)"
+fi
 cflags=${CFLAGS:--O1 -g}
 ldflags=${LDFLAGS:-}
 for variant in enabled minimal blink-dynamic-sync opaque disabled; do
@@ -42,7 +53,7 @@ PY
 		cat "build-$variant.log" >&2
 		exit 1
 	fi
-	${CC:-cc} $cflags -DVERSION=\"test\" -Iprotocols \
+	${CC:-cc} $cflags $reference_flags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/cursortrail_test.c \
 		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
 		$ldflags $(pkg-config --libs $packages) -lm -lutil -lrt -o cursortrail-test
