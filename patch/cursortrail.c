@@ -63,7 +63,7 @@ trailneedsframe(void)
 static void
 trailprepare(void)
 {
-	int top, y1, y2, y;
+	int top, y1, y2, y, row;
 
 	/* Called only AFTER startframe succeeds. Thus animation-only dirty bits
 	 * can never leak into tty parsing (notably sixel pruning) while waiting
@@ -80,8 +80,11 @@ trailprepare(void)
 	#endif
 	y1 = MAX(0, (trail.y1 - top) / win.ch);
 	y2 = MIN(term.row - 1, (trail.y2 - 1 - top) / win.ch);
-	for (y = y1; y <= y2; y++)
-		term.dirty[y] = 1;
+	for (y = y1; y <= y2; y++) {
+		/* scrollpixels() is about to move the rows it was painted on */
+		if ((row = scrolledrow(y)) >= 0)
+			term.dirty[row] = 1;
+	}
 	trail.painted = 0;
 }
 

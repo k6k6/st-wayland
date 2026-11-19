@@ -380,6 +380,18 @@ pixelsandcleanup(void)
 	trailprepare();
 	assert(!trail.painted && !trailneedsframe());
 	for (int y = 0; y < ROWS; y++) assert(dirty[y] == (y >= first && y <= last));
+	#if REFLOW_PATCH
+	/* Rows that scrolling moves take the painted trail with them. */
+	memset(dirty, 0, sizeof dirty); jump(); paint(130);
+	assert(first > 1 && last < ROWS - 1);
+	term.scrolls[0] = (RowScroll){first + 1, ROWS - 1, 1}; term.nscrolls = 1;
+	trailprepare();
+	for (int y = 0; y < ROWS; y++) assert(dirty[y] == (y >= first && y < last));
+	term.scrolls[0] = (RowScroll){0, ROWS - 1, -2};
+	memset(dirty, 0, sizeof dirty); jump(); paint(130); trailprepare();
+	for (int y = 0; y < ROWS; y++) assert(dirty[y] == (y >= first + 2 && y <= last + 2));
+	term.nscrolls = 0; memset(dirty, 0, sizeof dirty);
+	#endif
 	/* Settle after a painted frame: exactly one restoration, then idle. */
 	jump(); paint(130); trailprepare(); update(14, 6, 500, blank); paint(500);
 	assert(!trail.active && !trail.painted && !trailneedsframe());

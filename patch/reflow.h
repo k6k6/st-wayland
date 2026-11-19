@@ -1,11 +1,17 @@
 #define TLINE(y) ( \
-	(y) < term.scr ? term.hist[(term.histi + (y) - term.scr + 1 + HISTSIZE) % HISTSIZE] \
+	(y) < term.scr ? thistline((term.histi + (y) - term.scr + 1 + HISTSIZE) % HISTSIZE) \
 	               : term.line[(y) - term.scr] \
 )
 
 #define TLINEABS(y) ( \
-	(y) < 0 ? term.hist[(term.histi + (y) + 1 + HISTSIZE) % HISTSIZE] : term.line[(y)] \
+	(y) < 0 ? thistline((term.histi + (y) + 1 + HISTSIZE) % HISTSIZE) : term.line[(y)] \
 )
+
+/* term.dirty is indexed by rows of the view, which term.scr moves over the screen */
+#define TDIRTLINE(y) do { \
+	if ((y) + term.scr < term.row) \
+		term.dirty[(y) + term.scr] = 1; \
+} while (0)
 
 #define UPDATEWRAPNEXT(alt, col) do { \
 	if ((term.c.state & CURSOR_WRAPNEXT) && term.c.x + term.wrapcwidth[alt] < col) { \
@@ -28,6 +34,7 @@ static void tresizealt(int, int);
 void tfreehist(void);
 void kscrolldown(const Arg *);
 void kscrollup(const Arg *);
+static void tscrolldirt(int, int, int);
 static void tscrollup(int, int, int, int);
 static void tclearregion(int, int, int, int, int);
 static void tdeletechar(int);

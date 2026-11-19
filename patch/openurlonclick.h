@@ -4,5 +4,5 @@ static inline void restoremousecursor(void) {
 	if (!(win.mode & MODE_MOUSE) && xw.pointerisvisible)
 		wlsetpointer(POINTER_TEXT);
 }
-static void clearurl(void);
+void clearurl(void);
 static void openUrlOnClick(int col, int row, char* url_opener);

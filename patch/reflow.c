@@ -1,3 +1,100 @@
+/* History stores a prefix including one copy of its repeated final cell.
+ * Screen rows stay full width; readers expand history in place. No reader's
+ * pointer moves again until the event loop finishes and calls thistcompact(). */
+static int histaccessed; /* nothing to compact during ordinary output/typing */
+
+static int
+thistlength(Line line, int col)
+{
+	int len = col;
+
+	while (len > 1 && !memcmp(&line[len - 2], &line[col - 1], sizeof(Glyph)))
+		len--;
+	return len;
+}
+
+static void
+thiststore(int i, Line line, int col)
+{
+	int len = thistlength(line, col);
+
+	/* Shrinking an expanded row in place leaves a small prefix on almost
+	 * every old page. Allocate its packed copy separately so those pages
+	 * can actually be returned after searching or reflowing the history. */
+	Line old = term.hist[i];
+	if (len < abs(term.histlen[i])) {
+		term.hist[i] = xmalloc(len * sizeof(Glyph));
+		memcpy(term.hist[i], line, len * sizeof(Glyph));
+		free(old);
+	} else {
+		term.hist[i] = xrealloc(old, len * sizeof(Glyph));
+		memcpy(term.hist[i], line, len * sizeof(Glyph));
+	}
+	term.histlen[i] = len;
+	term.histcols[i] = col;
+}
+
+Line
+thistline(int i)
+{
+	int len = term.histlen[i], col = term.histcols[i], x;
+	Line line = term.hist[i];
+
+	if (len > 0) {
+		if (len < col) {
+			line = term.hist[i] = xrealloc(line, col * sizeof(Glyph));
+			for (x = len; x < col; x++)
+				line[x] = line[len - 1];
+		}
+		term.histlen[i] = -col;
+		histaccessed = 1;
+	}
+	return line;
+}
+
+/* Safe boundary: all event handlers and painters have returned. Keep visible
+ * rows and the keyboard selection's persistent cursors at stable addresses. */
+void
+thistcompact(void)
+{
+	int i, y, first = term.histi + HISTSIZE + 1 - term.scr;
+	size_t freed = 0;
+
+	if (!histaccessed)
+		return;
+	histaccessed = 0;
+	for (i = 0; i < HISTSIZE; i++) {
+		if (term.histlen[i] >= 0)
+			continue;
+		y = (i - first + 2 * HISTSIZE) % HISTSIZE;
+		if (y < term.scr && y < term.row && !IS_SET(MODE_ALTSCREEN)) {
+			histaccessed = 1;
+			continue;
+		}
+		#if KEYBOARDSELECT_PATCH
+		if (kbds_in_use && (term.hist[i] == kbds_c.line || term.hist[i] == kbds_oc.line)) {
+			histaccessed = 1;
+			continue;
+		}
+		#endif
+		int col = -term.histlen[i];
+		Line old = term.hist[i];
+		int len = thistlength(old, col);
+		if (len < col) {
+			term.hist[i] = xmalloc(len * sizeof(Glyph));
+			memcpy(term.hist[i], old, len * sizeof(Glyph));
+			free(old);
+			freed += (col - len) * sizeof(Glyph);
+		}
+		term.histlen[i] = len;
+	}
+	/* A search can expand all history while visible/pinned rows keep the
+	 * heap's end live. Return freed interior pages after a bulk compaction,
+	 * not for the few rows touched by ordinary scrolling. */
+	if (freed >= 1024 * 1024)
+		malloc_trim(0);
+}
+
 void
 tloaddefscreen(int clear, int loadcursor)
 {
@@ -195,8 +292,8 @@ treflow(int col, int row)
 	/* fill lines in history buffer and update term.histf */
 	for (/*i = -1 */; buflen > 0 && i >= -HISTSIZE; i--, ny--, buflen--) {
 		j = (term.histi + i + 1 + HISTSIZE) % HISTSIZE;
-		free(term.hist[j]);
-		term.hist[j] = buf[ny % nlines];
+		thiststore(j, buf[ny % nlines], col);
+		free(buf[ny % nlines]);
 	}
 	term.histf = -i - 1;
 	term.scr = MIN(term.scr, term.histf);
@@ -205,6 +302,7 @@ treflow(int col, int row)
 		j = (term.histi + i + 1 + HISTSIZE) % HISTSIZE;
 		free(term.hist[j]);
 		term.hist[j] = NULL;
+		term.histlen[j] = term.histcols[j] = 0;
 	}
 
 	#if SIXEL_PATCH
@@ -256,8 +354,10 @@ rscrolldown(int n)
 	}
 	for (/*i = n - 1 */; i >= 0; i--) {
 		temp = term.line[i];
-		term.line[i] = term.hist[term.histi];
-		term.hist[term.histi] = temp;
+		term.line[i] = thistline(term.histi);
+		term.hist[term.histi] = NULL;
+		term.histlen[term.histi] = term.histcols[term.histi] = 0;
+		free(temp);
 		term.histi = (term.histi - 1 + HISTSIZE) % HISTSIZE;
 	}
 	term.c.y += n;
@@ -396,7 +496,9 @@ tfreehist(void)
 	for (i = 0; i < HISTSIZE; i++) {
 		free(term.hist[i]);
 		term.hist[i] = NULL;
+		term.histlen[i] = term.histcols[i] = 0;
 	}
+	histaccessed = 0;
 	malloc_trim(0); /* actually return the freed scrollback to the kernel */
 }
 
@@ -420,7 +522,10 @@ kscrolldown(const Arg* a)
 
 	if (sel.ob.x != -1 && !sel.alt)
 		selmove(-n); /* negate change in term.scr */
-	tfulldirt();
+	#if SYNC_PATCH
+	tsync_end(); /* as tfulldirt() does: the user is not kept waiting */
+	#endif // SYNC_PATCH
+	tscrolldirt(0, term.row - 1, n);
 
 	#if SIXEL_PATCH
 	scroll_images(-1*n);
@@ -452,7 +557,10 @@ kscrollup(const Arg* a)
 
 	if (sel.ob.x != -1 && !sel.alt)
 		selmove(n); /* negate change in term.scr */
-	tfulldirt();
+	#if SYNC_PATCH
+	tsync_end(); /* as tfulldirt() does: the user is not kept waiting */
+	#endif // SYNC_PATCH
+	tscrolldirt(0, term.row - 1, -n);
 
 	#if SIXEL_PATCH
 	scroll_images(n);
@@ -464,6 +572,52 @@ kscrollup(const Arg* a)
 	#endif // OPENURLONCLICK_PATCH
 }
 
+/*
+ * Rows top..bot of the view moved up by n (down if negative) and the rows
+ * they left hold new lines.  The lines that only moved are already painted:
+ * their dirty flags move with them and the move is recorded, so that the
+ * window shifts their pixels instead of drawing every line of the region
+ * again (scrollpixels() in wl.c).
+ */
+void
+tscrolldirt(int top, int bot, int n)
+{
+	int h = bot - top + 1, m = abs(n), i;
+	RowScroll *s;
+
+	if (!n || h <= 0)
+		return;
+	#if OPENURLONCLICK_PATCH
+	clearurl(); /* its underline is painted over the rows, it does not move */
+	#endif // OPENURLONCLICK_PATCH
+	if (m >= h) {
+		n = n < 0 ? -h : h;
+		m = h;
+	} else if (n > 0) {
+		memmove(&term.dirty[top], &term.dirty[top + m], (h - m) * sizeof(*term.dirty));
+	} else {
+		memmove(&term.dirty[top + m], &term.dirty[top], (h - m) * sizeof(*term.dirty));
+	}
+	for (i = n > 0 ? bot - m + 1 : top; m > 0; m--)
+		term.dirty[i++] = 1;
+
+	/* scrolls of other rows in between do not change what this one moves */
+	for (i = term.nscrolls - 1; i >= 0; i--) {
+		s = &term.scrolls[i];
+		if (s->top == top && s->bot == bot) {
+			s->n += n;
+			LIMIT(s->n, -h, h);
+			return;
+		}
+		if (s->top <= bot && top <= s->bot)
+			break;
+	}
+	if (term.nscrolls < LEN(term.scrolls))
+		term.scrolls[term.nscrolls++] = (RowScroll){top, bot, n};
+	else
+		tfulldirt(); /* too many to follow */
+}
+
 void
 tscrollup(int top, int bot, int n, int mode)
 {
@@ -472,7 +626,6 @@ tscrollup(int top, int bot, int n, int mode)
 	#endif //OPENURLONCLICK_PATCH
 
 	int i, j, s;
-	Line temp;
 	int alt = IS_SET(MODE_ALTSCREEN);
 	int savehist = !alt && top == 0 && mode != SCROLL_NOSAVEHIST;
 	int scr = alt ? 0 : term.scr;
@@ -491,13 +644,9 @@ tscrollup(int top, int bot, int n, int mode)
 		                .fg = term.c.attr.fg, .bg = term.c.attr.bg };
 		for (i = 0; i < n; i++) {
 			term.histi = (term.histi + 1) % HISTSIZE;
-			temp = term.hist[term.histi];
-			if (!temp)
-				temp = xmalloc(term.col * sizeof(Glyph));
+			thiststore(term.histi, term.line[i], term.col);
 			for (j = 0; j < term.col; j++)
-				temp[j] = blank;
-			term.hist[term.histi] = term.line[i];
-			term.line[i] = temp;
+				term.line[i][j] = blank;
 		}
 		term.histf = MIN(term.histf + n, HISTSIZE);
 		s = n;
@@ -506,11 +655,22 @@ tscrollup(int top, int bot, int n, int mode)
 			term.scr = MIN(j + n, HISTSIZE);
 			s = j + n - term.scr;
 		}
-		if (mode != SCROLL_RESIZE)
-			tfulldirt();
+		if (mode != SCROLL_RESIZE) { /* else the caller repaints everything */
+			#if SYNC_PATCH
+			tsync_end(); /* as the tfulldirt() this once was */
+			#endif // SYNC_PATCH
+			if (!scr)
+				tscrolldirt(0, bot, n);
+			else if (s || bot < term.row - 1)
+				tfulldirt();
+			/* else the view is scrolled back and stays on the same lines */
+		}
 	} else {
 		tclearregion(0, top, term.col-1, top+n-1, 1);
-		tsetdirt(top + scr, bot + scr);
+		if (scr)
+			tsetdirt(top + scr, bot + scr);
+		else
+			tscrolldirt(top, bot, n);
 	}
 
 	/*
@@ -560,6 +720,11 @@ tscrollup(int top, int bot, int n, int mode)
 		if (!savehist) {
 			selscroll(top, bot, -n);
 		} else if (s > 0) {
+			/* it moves as a whole, also below the region where the
+			 * lines stay, and is dropped once it leaves the history */
+			if (mode != SCROLL_RESIZE && (sel.ne.y > bot + scr ||
+			    sel.nb.y - s - term.scr < -term.histf))
+				tfulldirt();
 			selmove(-s);
 			if (-term.scr + sel.nb.y < -term.histf)
 				selremove();
@@ -586,8 +751,11 @@ tscrolldown(int top, int n)
 		return;
 	n = MIN(n, bot-top+1);
 
-	tsetdirt(top + scr, bot + scr);
 	tclearregion(0, bot-n+1, term.col-1, bot, 1);
+	if (scr)
+		tsetdirt(top + scr, bot + scr);
+	else
+		tscrolldirt(top, bot, -n);
 
 	for (i = bot; i >= top+n; i--) {
 		temp = term.line[i];
@@ -648,7 +816,7 @@ tclearregion(int x1, int y1, int x2, int y2, int usecurattr)
 		selclear();
 
 	for (y = y1; y <= y2; y++) {
-		term.dirty[y] = 1;
+		TDIRTLINE(y);
 		for (x = x1; x <= x2; x++)
 			tclearglyph(&term.line[y][x], usecurattr);
 	}
@@ -668,8 +836,10 @@ tnew(int col, int row)
 	term.dirty = xmalloc(row * sizeof(*term.dirty));
 	term.tabs = xmalloc(col * sizeof(*term.tabs));
 	/* scrollback lines are allocated lazily when content scrolls into them */
-	for (i = 0; i < HISTSIZE; i++)
+	for (i = 0; i < HISTSIZE; i++) {
 		term.hist[i] = NULL;
+		term.histlen[i] = term.histcols[i] = 0;
+	}
 	treset();
 }
 
@@ -861,6 +1031,7 @@ selscroll(int top, int bot, int n)
 
 	if (BETWEEN(sel.nb.y, top, bot) != BETWEEN(sel.ne.y, top, bot)) {
 		selclear();
+		tsetdirt(top, bot); /* its rows inside the region have moved */
 	} else if (BETWEEN(sel.nb.y, top, bot)) {
 		selmove(n);
 		if (sel.nb.y < top || sel.ne.y > bot)

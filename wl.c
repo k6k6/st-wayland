@@ -138,6 +138,7 @@ typedef struct {
 	size_t size;
 	int width, height, stride;
 	int busy;		/* held by the compositor */
+	struct timespec used;	/* when it was last committed */
 	DamageRegion damage;	/* changes since the compositor last saw this buffer */
 	cairo_surface_t *surface;
 	cairo_t *cr;
@@ -282,17 +283,14 @@ int borderpx;
 
 /* wayland state */
 /*
- * Two buffers are enough with a persistent off-screen surface: while the
- * compositor holds one we draw into the other.  Each buffer is
- * win.w*win.h*4 bytes, so keep this small.
- */
-/*
- * One buffer suffices while the compositor releases it right after the
- * commit (Hyprland does), two when it holds the displayed one; the third
- * is only touched if both others are still held, so it normally costs no
- * RSS at all.
+ * Each buffer is win.w*win.h*4 bytes.  One suffices while the compositor
+ * releases it right after the commit (wlroots with a GPU renderer does),
+ * two when it holds the displayed one; the third is only touched if both
+ * others are still held.  Buffers the compositor has released are given
+ * back once nothing was drawn for BUFFER_IDLE ms, see trimbuffers().
  */
 #define NBUFFERS 3
+#define BUFFER_IDLE 5000.0
 static ShmBuffer buffers[NBUFFERS];
 static ShmBuffer *curbuf;	/* buffer being drawn this frame (xstartdraw..present) */
 static ShmBuffer *lastbuf;	/* most recently committed buffer: holds the full picture */
@@ -476,6 +474,7 @@ static const struct wl_buffer_listener bufferlistener = { bufferrelease };
 static struct wl_callback *framecb;
 static struct timespec framereq;
 static int presentpending;	/* damage could not be committed: no free buffer */
+static int forcedraw;		/* commit the next frame even if it changes nothing */
 
 static void
 frame_done(void *data, struct wl_callback *cb, uint32_t time)
@@ -570,6 +569,34 @@ destroybuffer(ShmBuffer *b)
 	if (curbuf == b)
 		curbuf = NULL;
 	memset(b, 0, sizeof(*b));
+}
+
+/*
+ * A released wl_buffer may be destroyed without changing what the surface
+ * shows (wl_surface.attach), and a terminal sits idle most of the time, so
+ * buffers that were not committed for BUFFER_IDLE ms are returned to the
+ * system.  Without a buffer holding the previous picture the next frame
+ * starts from scratch: startframe() then repaints every line.
+ * Returns the milliseconds until the next buffer is due, or -1.
+ */
+static double
+trimbuffers(const struct timespec *nowp)
+{
+	struct timespec now = *nowp;
+	double left, next = -1;
+	int i;
+
+	for (i = 0; i < NBUFFERS; i++) {
+		ShmBuffer *b = &buffers[i];
+		if (!b->buffer || b->busy || b == curbuf)
+			continue;
+		left = BUFFER_IDLE - TIMEDIFF(now, b->used);
+		if (left <= 0)
+			destroybuffer(b);
+		else if (next < 0 || left < next)
+			next = left;
+	}
+	return next;
 }
 
 /*
@@ -685,10 +712,40 @@ pixelrowdirty(int py)
 	return term.dirty[row];
 }
 
-/* Bring only stale regions up to date; rows about to be repainted need no copy. */
+#if REFLOW_PATCH
+/* Where scrolling has taken row y of the last frame; -1 if it is gone. */
+static int
+scrolledrow(int y)
+{
+	const RowScroll *s;
+	int i;
+
+	for (i = 0; i < term.nscrolls && y >= 0; i++) {
+		s = &term.scrolls[i];
+		if (!BETWEEN(y, s->top, s->bot))
+			continue;
+		y -= s->n;
+		if (!BETWEEN(y, s->top, s->bot))
+			y = -1;
+	}
+	return y < term.row ? y : -1;
+}
+#else
+#define scrolledrow(y) (y)
+#endif // REFLOW_PATCH
+
+/*
+ * Bring only stale regions up to date; rows about to be repainted need no
+ * copy, unless scrollpixels() is going to move what they hold.
+ */
 static void
 copybufferdamage(ShmBuffer *dst, const ShmBuffer *src)
 {
+	int all = 0;
+
+	#if REFLOW_PATCH
+	all = term.nscrolls > 0;
+	#endif // REFLOW_PATCH
 	if (dst == src || !dst->damage.count)
 		return;
 	cairo_surface_flush(src->surface);
@@ -701,7 +758,7 @@ copybufferdamage(ShmBuffer *dst, const ShmBuffer *src)
 		if (rowbytes <= 0 || y2 <= r.y1)
 			continue;
 		for (int py = r.y1; py < y2; py++) {
-			if (pixelrowdirty(py))
+			if (!all && pixelrowdirty(py))
 				continue;
 			memcpy((unsigned char *)dst->data + (size_t)py * dst->stride + r.x1 * 4,
 			       (const unsigned char *)src->data + (size_t)py * src->stride + r.x1 * 4,
@@ -735,8 +792,14 @@ startframe(void)
 	}
 	presentpending = 0;
 
-	if (lastbuf)
+	if (lastbuf) {
 		copybufferdamage(b, lastbuf);
+	} else {
+		/* nothing holds the previous picture (first frame, or the
+		 * buffers were trimmed while idle): repaint everything */
+		for (int y = 0; term.dirty && y < term.row; y++)
+			term.dirty[y] = 1;
+	}
 	/*
 	 * b->damage is kept: it is what the compositor has not seen in this
 	 * buffer yet, and this frame's drawing accumulates on top of it.
@@ -783,6 +846,7 @@ present(void)
 	damageclear(&b->damage);
 	b->busy = 1;
 	lastbuf = b;
+	forcedraw = 0;
 	if (xw.viewport) {
 		wp_viewport_set_destination(xw.viewport, xw.lw, xw.lh);
 	} else if (compositorversion >= 3) {
@@ -793,6 +857,7 @@ present(void)
 	framecb = wl_surface_frame(xw.win);
 	wl_callback_add_listener(framecb, &framelistener, NULL);
 	clock_gettime(CLOCK_MONOTONIC, &framereq);
+	b->used = framereq;
 	wl_surface_commit(xw.win);
 	wl_display_flush(xw.dpy);
 }
@@ -2128,6 +2193,7 @@ xloadalpha(void)
 {
 	float a = effectivealpha();
 
+	forcedraw = 1; /* the cursor is painted with these colours */
 	applyalpha(&dc.col[defaultbg], a);
 	#if SELECTION_COLORS_PATCH && SELECTIONBG_ALPHA_PATCH
 	applyalpha(&dc.col[selectionbg], a);
@@ -2157,6 +2223,7 @@ xloadcols(void)
 		xloadcolor(focused ? bg : bgUnfocused, NULL, &dc.col[defaultbg]);
 
 	xloadalpha();
+	forcedraw = 1;
 	loaded = 1;
 }
 #else
@@ -2181,6 +2248,7 @@ xloadcols(void)
 	#if ALPHA_PATCH
 	xloadalpha();
 	#endif // ALPHA_PATCH
+	forcedraw = 1;
 	loaded = 1;
 }
 #endif // ALPHA_FOCUS_HIGHLIGHT_PATCH
@@ -2210,6 +2278,7 @@ xsetcolorname(int x, const char *name)
 		return 1;
 
 	dc.col[x] = ncolor;
+	forcedraw = 1;
 
 	#if ALPHA_PATCH
 	if (x == defaultbg
@@ -2593,6 +2662,7 @@ xdgsurface_configure(void *data, struct xdg_surface *surface, uint32_t serial)
 		win.mode |= MODE_VISIBLE;
 	}
 	updatesize();
+	forcedraw = 1; /* a configure is always answered with a commit */
 	wlevents++;
 }
 
@@ -3215,6 +3285,7 @@ textinput_leave(void *data, struct zwp_text_input_v3 *ti, struct wl_surface *sur
 	free(ime.ppreedit); ime.ppreedit = NULL;
 	free(ime.pcommit); ime.pcommit = NULL;
 	ime_clearpreedit();
+	forcedraw = 1;
 	wlevents++;
 }
 
@@ -3267,6 +3338,7 @@ textinput_done(void *data, struct zwp_text_input_v3 *ti, uint32_t serial)
 		ime.ppreedit = NULL;
 	}
 	ime.ppre_begin = ime.ppre_end = -1;
+	forcedraw = 1; /* the preedit is painted over the text, not part of it */
 	wlevents++;
 }
 
@@ -4599,15 +4671,13 @@ drawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 	    restoredrows[oy] != line || len != term.col)
 		xdrawline(line, 0, oy, len);
 	#else
-	/* Remove the old cursor */
-	if (selected(ox, oy))
-		#if SELECTION_COLORS_PATCH
-		og.mode |= ATTR_SELECTED;
-		#else
-		og.mode ^= ATTR_REVERSE;
-		#endif // SELECTION_COLORS_PATCH
-
-	xdrawglyph(og, ox, oy);
+	/* A glyph may extend into its neighbour even without shaping. Restoring
+	 * just the cursor cell can erase that neighbour or blend it twice. */
+	#if REFLOW_PATCH || SCROLLBACK_PATCH
+	xdrawline(TLINE(oy), 0, oy, term.col);
+	#else
+	xdrawline(term.line[oy], 0, oy, term.col);
+	#endif
 	#endif // LIGATURES_PATCH
 
 	#if HIDE_TERMINAL_CURSOR_PATCH
@@ -4865,14 +4935,170 @@ xsettitle(char *p)
 }
 #endif // CSI_22_23_PATCH
 
+/*
+ * Everything the cursor painted over the text depends on, as it was in the
+ * last committed frame.  Most wakeups change nothing on screen - pointer
+ * motion, key releases, modifier keys, tty input without a visible effect -
+ * and a frame that would paint the same picture again is neither drawn nor
+ * committed.
+ */
+static struct {
+	int valid;
+	int x, y, scr, mode, cursor, selected;
+	Glyph g;
+} drawn;
+
+static int
+framechanged(void)
+{
+	int same, y;
+
+	same = drawn.valid && !forcedraw && !presentpending && lastbuf &&
+		lastbuf->width == win.w && lastbuf->height == win.h;
+	#if KEYBOARDSELECT_PATCH && REFLOW_PATCH
+	same = same && !IS_SET(MODE_KBDSELECT); /* it has a cursor of its own */
+	#endif // KEYBOARDSELECT_PATCH
+	#if CURSOR_TRAIL_PATCH
+	same = same && !trailneedsframe();
+	#endif
+	for (y = 0; same && y < term.row; y++)
+		same = !term.dirty[y];
+
+	drawn.valid = 0;
+	if (!BETWEEN(term.c.x, 0, term.col - 1) || !BETWEEN(term.c.y, 0, term.row - 1))
+		return 1;
+	y = 0;
+	#if SCROLLBACK_PATCH || REFLOW_PATCH
+	y = term.scr;
+	#endif // SCROLLBACK_PATCH | REFLOW_PATCH
+	same = same && drawn.x == term.c.x && drawn.y == term.c.y && drawn.scr == y &&
+		drawn.mode == win.mode && drawn.cursor == win.cursor &&
+		drawn.selected == selected(term.c.x, term.c.y) &&
+		!memcmp(&drawn.g, &term.line[term.c.y][term.c.x], sizeof(Glyph));
+	drawn.x = term.c.x;
+	drawn.y = term.c.y;
+	drawn.scr = y;
+	drawn.mode = win.mode;
+	drawn.cursor = win.cursor;
+	drawn.selected = selected(term.c.x, term.c.y);
+	drawn.g = term.line[term.c.y][term.c.x];
+	drawn.valid = 1;
+	return !same;
+}
+
+#if REFLOW_PATCH
+/* Does the frame start from the picture the scrolls were recorded against? */
+static int
+scrollable(void)
+{
+	#if ANYSIZE_PATCH
+	int top = win.vborderpx;
+	#else
+	int top = borderpx;
+	#endif // ANYSIZE_PATCH
+
+	#if KEYBOARDSELECT_PATCH
+	if (IS_SET(MODE_KBDSELECT)) /* paints a cursor and bars of its own */
+		return 0;
+	#endif // KEYBOARDSELECT_PATCH
+	return lastbuf && lastbuf->width == win.w && lastbuf->height == win.h &&
+		win.ch > 0 && top >= 0 && top + term.row * win.ch <= win.h;
+}
+
+/*
+ * Scrolling leaves most lines of a region as they were painted, only on
+ * other rows (tscrolldirt() in reflow.c).  Their pixels are moved within
+ * the buffer and the lines that are new are drawn, instead of drawing the
+ * whole region again: a full row costs about three times as much to draw
+ * as to move.
+ */
+static void
+scrollpixels(void)
+{
+	ShmBuffer *b = curbuf;
+	const RowScroll *s, *t;
+	unsigned char *base;
+	size_t rowbytes = (size_t)win.ch * b->stride;
+	int i, j, y, e, a, n, m, lo, hi, step, exact;
+	#if ANYSIZE_PATCH
+	int top = win.vborderpx;
+	#else
+	int top = borderpx;
+	#endif // ANYSIZE_PATCH
+
+	if (!term.nscrolls)
+		return;
+	if (!scrollable()) {
+		/* draw the scrolled rows instead */
+		for (i = 0; i < term.nscrolls; i++)
+			for (y = term.scrolls[i].top; y <= term.scrolls[i].bot && y < term.row; y++)
+				term.dirty[y] = 1;
+		term.nscrolls = 0;
+		return;
+	}
+	/* The cursor is painted over a line, it is not part of it: draw the
+	 * line again where it is now. */
+	if ((y = scrolledrow(term.ocy)) >= 0)
+		term.dirty[y] = 1;
+
+	cairo_surface_flush(b->surface);
+	base = (unsigned char *)b->data + (size_t)top * b->stride;
+	for (i = 0; i < term.nscrolls; i++) {
+		s = &term.scrolls[i];
+		m = abs(s->n);
+		if (!m || m >= s->bot - s->top + 1)
+			continue;
+		/* term.dirty tells which rows are drawn anyway and need no pixels,
+		 * unless a later scroll moves them on to a row that does */
+		for (exact = 1, j = i + 1; j < term.nscrolls; j++) {
+			t = &term.scrolls[j];
+			if (t->top <= s->bot && s->top <= t->bot)
+				exact = 0;
+		}
+		/* runs of rows y..e to fill, in the order that keeps their sources */
+		lo = s->n > 0 ? s->top : s->top + m;
+		hi = s->n > 0 ? s->bot - m : s->bot;
+		step = s->n > 0 ? 1 : -1;
+		for (y = step > 0 ? lo : hi; y >= lo && y <= hi; y = e + step) {
+			e = y;
+			if (exact && term.dirty[y])
+				continue;
+			while (e + step >= lo && e + step <= hi &&
+			       !(exact && term.dirty[e + step]))
+				e += step;
+			a = MIN(y, e);
+			n = abs(e - y) + 1;
+			memmove(base + a * rowbytes, base + (a + s->n) * rowbytes, n * rowbytes);
+			cairo_surface_mark_dirty_rectangle(b->surface, 0, top + a * win.ch,
+					b->width, n * win.ch);
+			adddamage(0, top + a * win.ch, win.w, n * win.ch);
+		}
+	}
+	term.nscrolls = 0;
+}
+#endif // REFLOW_PATCH
+
 int
 xstartdraw(void)
 {
-	if (!IS_SET(MODE_VISIBLE) || !startframe())
+	if (!IS_SET(MODE_VISIBLE))
 		return 0;
+	if (!framechanged())
+		return 0;
+	if (!startframe()) {
+		drawn.valid = 0; /* not painted after all */
+		return 0;
+	}
 	#if CURSOR_TRAIL_PATCH
 	trailprepare();
 	#endif
+	/* The preedit is painted over a line as well, and only the cell of the
+	 * old cursor is restored unless ligatures have the whole line drawn. */
+	if (ime.row >= 0)
+		ime_dirtyrow(scrolledrow(ime.row));
+	#if REFLOW_PATCH
+	scrollpixels();
+	#endif // REFLOW_PATCH
 	return 1;
 }
 
@@ -5480,7 +5706,7 @@ run(void)
 	int wlfd = wl_display_get_fd(xw.dpy), ttyfd, xev, drawing, nfds, i;
 	int prevevents, needdraw = 1, blinkattr = 0;
 	struct timespec seltv, *tv, now, lastblink, trigger;
-	double timeout, rt;
+	double timeout, rt, bt;
 
 	/* Waiting for the first configure event (the window is mapped) */
 	while (!xw.configured) {
@@ -5688,6 +5914,9 @@ run(void)
 		 */
 		if (needdraw)
 			blinkattr = tattrset(ATTR_BLINK);
+		#if REFLOW_PATCH
+		thistcompact();
+		#endif
 		wl_display_flush(xw.dpy);
 		#if CURSOR_TRAIL_PATCH
 		/* Handle a missing callback/free buffer without spinning. */
@@ -5696,6 +5925,10 @@ run(void)
 		#endif
 		drawing = 0;
 		needdraw = 0;
+		/* one more wakeup after the last frame, then none at all */
+		bt = trimbuffers(&now);
+		if (bt >= 0 && (timeout < 0 || bt < timeout))
+			timeout = bt;
 	}
 }
 

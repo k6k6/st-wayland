@@ -1124,10 +1124,16 @@ void
 tsetdirtattr(int attr)
 {
 	int i, j;
+	Line line;
 
 	for (i = 0; i < term.row; i++) {
+		#if REFLOW_PATCH
+		line = TLINE(i); /* term.dirty is indexed by rows of the view */
+		#else
+		line = term.line[i];
+		#endif // REFLOW_PATCH
 		for (j = 0; j < term.col; j++) {
-			if (term.line[i][j].mode & attr) {
+			if (line[j].mode & attr) {
 				#if REFLOW_PATCH
 				term.dirty[i] = 1;
 				#else
@@ -1157,6 +1163,7 @@ tfulldirt(void)
 	#if REFLOW_PATCH
 	for (int i = 0; i < term.row; i++)
 		term.dirty[i] = 1;
+	term.nscrolls = 0; /* nothing painted is kept */
 	#else
 	tsetdirt(0, term.row-1);
 	#endif // REFLOW_PATCH
@@ -1631,7 +1638,11 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
 		term.line[y][x-1].mode &= ~ATTR_WIDE;
 	}
 
+	#if REFLOW_PATCH
+	TDIRTLINE(y);
+	#else
 	term.dirty[y] = 1;
+	#endif // REFLOW_PATCH
 	term.line[y][x] = *attr;
 	term.line[y][x].u = u;
 	#if REFLOW_PATCH
@@ -2878,7 +2889,7 @@ strhandle(void)
 					next = im->next;
 					if (im->y >= y1 && im->y < y2) {
 						y = im->y - scr;
-						if (y >= 0 && y < term.row && term.dirty[y]) {
+						if (y >= 0 && y < term.row && im->y < term.row && term.dirty[im->y]) {
 							line = term.line[y];
 							j = MIN(im->x + im->cols, term.col);
 							for (i = im->x; i < j; i++) {

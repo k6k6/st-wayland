@@ -13,13 +13,14 @@ cp patches.h patches.test-base.h
 packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
 cflags=${CFLAGS:--O1 -g}
 ldflags=${LDFLAGS:-}
-for variant in enabled no-ligatures no-wide minimal; do
+for variant in enabled no-ligatures no-wide minimal no-reflow; do
 	python3 - "$variant" <<'PY'
 from pathlib import Path
 import re, sys
 v = sys.argv[1]
 p = Path('patches.test-base.h').read_text()
-for key, value in [('FONT2_PATCH', False), ('LIGATURES_PATCH', v not in ('no-ligatures', 'minimal')),
+for key, value in [('FONT2_PATCH', False), ('REFLOW_PATCH', v != 'no-reflow'),
+                   ('LIGATURES_PATCH', v not in ('no-ligatures', 'minimal')),
                    ('WIDE_GLYPHS_PATCH', v not in ('no-wide', 'minimal')),
                    ('ANYSIZE_PATCH', v != 'minimal'), ('ALPHA_PATCH', v != 'minimal')]:
     p, n = re.subn(r'(#define ' + key + r')\s+\d+', lambda m: m[1] + ' ' + str(int(value)), p)

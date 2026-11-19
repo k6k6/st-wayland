@@ -264,6 +264,11 @@ typedef struct {
 	char state;
 } TCursor;
 
+/* Rows top..bot of the view moved up by n (down if negative) since the last frame */
+typedef struct {
+	int top, bot, n;
+} RowScroll;
+
 /* Internal representation of the screen */
 typedef struct {
 	int row;      /* nb row */
@@ -274,11 +279,15 @@ typedef struct {
 	Line *line;   /* screen */
 	Line *alt;    /* alternate screen */
 	#if REFLOW_PATCH
-	Line hist[HISTSIZE]; /* history buffer */
+	Line hist[HISTSIZE]; /* repeated trailing cells are stored once */
+	int histlen[HISTSIZE]; /* stored cells; negative means expanded for access */
+	int histcols[HISTSIZE]; /* logical width, also during reflow/alt-screen resize */
 	int histi;           /* history index */
 	int histf;           /* nb history available */
 	int scr;             /* scroll back */
 	int wrapcwidth[2];   /* used in updating WRAPNEXT when resizing */
+	RowScroll scrolls[4]; /* painted rows to move instead of redrawing */
+	int nscrolls;
 	#elif SCROLLBACK_PATCH
 	Line hist[HISTSIZE]; /* history buffer */
 	int histi;    /* history index */
@@ -469,6 +478,10 @@ void redraw(void);
 void draw(void);
 void drawregion(int, int, int, int);
 void tfulldirt(void);
+#if REFLOW_PATCH
+Line thistline(int);
+void thistcompact(void);
+#endif
 
 void printscreen(const Arg *);
 void printsel(const Arg *);

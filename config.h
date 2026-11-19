@@ -117,11 +117,11 @@ static unsigned int cursorthickness = 2;
 
 #if CURSOR_TRAIL_PATCH
 /* Kitty-style trail: 0 disables; otherwise minimum cursor dwell in ms. */
-static unsigned int cursortrail = 100;
+static unsigned int cursortrail = 1;
 /* Fastest/slowest corner decay in ms (positive, slow >= fast). */
 static double cursortraildecay[2] = {100, 300};
 /* Minimum horizontal OR vertical move in cells; 2 skips ordinary typing. */
-static int cursortrailthreshold = 2;
+static int cursortrailthreshold = 3;
 #endif
 
 #if HIDECURSOR_PATCH
