@@ -1120,6 +1120,49 @@ tsetdirt(int top, int bot)
 		term.dirty[i] = 1;
 }
 
+/* A direct dirty=1 from an overlay or an untracked mutation must win over
+ * narrower hints. Existing patch paths can therefore remain conservative. */
+void
+tsetdirtcols(int row, int left, int right)
+{
+	if (!BETWEEN(row, 0, term.row - 1) || left >= right)
+		return;
+	/* Fully dirty rows cannot gain a narrower hint. This is the common
+	 * case while parsing continuous output before the next frame. */
+	if (term.dirty[row] == DIRTY_FULL)
+		return;
+	if (!term.dirtycols) { /* standalone renderer users may supply only dirty */
+		term.dirty[row] = DIRTY_FULL;
+		return;
+	}
+	left = MAX(0, left);
+	right = MIN(term.col, right);
+	if (left >= right)
+		return;
+	if (term.dirty[row] == DIRTY_PARTIAL) {
+		left = MIN(term.dirtycols[row].left, left);
+		right = MAX(term.dirtycols[row].right, right);
+	}
+	/* A complete interval is equivalent to full invalidation. Subsequent
+	 * writes can skip both range merging and the dirtycols memory access. */
+	if (left == 0 && right == term.col) {
+		term.dirty[row] = DIRTY_FULL;
+	} else {
+		term.dirtycols[row] = (DirtyRange){left, right};
+		term.dirty[row] = DIRTY_PARTIAL;
+	}
+}
+
+static inline void
+tdirtcols(int row, int left, int right)
+{
+	#if REFLOW_PATCH
+	row += term.scr;
+	#endif
+	if (BETWEEN(row, 0, term.row - 1) && term.dirty[row] != DIRTY_FULL)
+		tsetdirtcols(row, left, right);
+}
+
 void
 tsetdirtattr(int attr)
 {
@@ -1523,6 +1566,27 @@ tnewline(int first_col)
 	tmoveto(first_col ? 0 : term.c.x, y);
 }
 
+/* Most CSI parameters are small unsigned decimal values. Keep strtol's exact
+ * handling of signed, whitespace-prefixed and large inputs on the slow path. */
+static long
+csiarg(char *p, char **end)
+{
+	char *start = p;
+	unsigned int value = 0;
+	int digits = 0;
+
+	if (!BETWEEN((unsigned char)*p, '0', '9'))
+		return strtol(p, end, 10);
+	do {
+		value = value * 10 + (*p++ - '0');
+		digits++;
+	} while (digits < 9 && BETWEEN((unsigned char)*p, '0', '9'));
+	if (BETWEEN((unsigned char)*p, '0', '9'))
+		return strtol(start, end, 10);
+	*end = p;
+	return value;
+}
+
 #if UNDERCURL_PATCH
 void
 readcolonargs(char **p, int cursor, int params[][CAR_PER_ARG])
@@ -1540,7 +1604,7 @@ readcolonargs(char **p, int cursor, int params[][CAR_PER_ARG])
 	while (**p == ':' && i < CAR_PER_ARG) {
 		while (**p == ':')
 			(*p)++;
-		params[cursor][i] = strtol(*p, &np, 10);
+		params[cursor][i] = csiarg(*p, &np);
 		*p = np;
 		i++;
 	}
@@ -1563,7 +1627,7 @@ csiparse(void)
 	csiescseq.buf[csiescseq.len] = '\0';
 	while (p < csiescseq.buf+csiescseq.len) {
 		np = NULL;
-		v = strtol(p, &np, 10);
+		v = csiarg(p, &np);
 		if (np == p)
 			v = 0;
 		if (v == LONG_MAX || v == LONG_MIN)
@@ -1610,6 +1674,7 @@ tmoveto(int x, int y)
 void
 tsetchar(Rune u, const Glyph *attr, int x, int y)
 {
+	int left = x, right = x + 1;
 	static const char *vt100_0[62] = { /* 0x41 - 0x7e */
 		"↑", "↓", "→", "←", "█", "▚", "☃", /* A - G */
 		0, 0, 0, 0, 0, 0, 0, 0, /* H - O */
@@ -1630,19 +1695,17 @@ tsetchar(Rune u, const Glyph *attr, int x, int y)
 
 	if (term.line[y][x].mode & ATTR_WIDE) {
 		if (x+1 < term.col) {
+			right++;
 			term.line[y][x+1].u = ' ';
 			term.line[y][x+1].mode &= ~ATTR_WDUMMY;
 		}
 	} else if (term.line[y][x].mode & ATTR_WDUMMY) {
+		left--;
 		term.line[y][x-1].u = ' ';
 		term.line[y][x-1].mode &= ~ATTR_WIDE;
 	}
 
-	#if REFLOW_PATCH
-	TDIRTLINE(y);
-	#else
-	term.dirty[y] = 1;
-	#endif // REFLOW_PATCH
+	tdirtcols(y, left, right);
 	term.line[y][x] = *attr;
 	term.line[y][x].u = u;
 	#if REFLOW_PATCH
@@ -1678,7 +1741,7 @@ tclearregion(int x1, int y1, int x2, int y2)
 	LIMIT(y2, 0, term.row-1);
 
 	for (y = y1; y <= y2; y++) {
-		term.dirty[y] = 1;
+		tdirtcols(y, x1, x2 + 1);
 		for (x = x1; x <= x2; x++) {
 			gp = &term.line[y][x];
 			if (selected(x, y))
@@ -1707,6 +1770,7 @@ tdeletechar(int n)
 	line = term.line[term.c.y];
 
 	memmove(&line[dst], &line[src], size * sizeof(Glyph));
+	tdirtcols(term.c.y, dst, term.col);
 	tclearregion(term.col-n, term.c.y, term.col-1, term.c.y);
 }
 #endif // REFLOW_PATCH
@@ -1726,6 +1790,7 @@ tinsertblank(int n)
 	line = term.line[term.c.y];
 
 	memmove(&line[dst], &line[src], size * sizeof(Glyph));
+	tdirtcols(term.c.y, src, term.col);
 	tclearregion(src, term.c.y, dst - 1, term.c.y);
 }
 #endif // REFLOW_PATCH
@@ -3455,13 +3520,115 @@ eschandle(uchar ascii)
 	return 1;
 }
 
+/* Shared printable-character path. Parser ASCII fast dispatch and the full
+ * control/UTF-8 path must keep exactly the same cursor and cell semantics. */
+static void
+tputglyph(Rune u, int width)
+{
+	Glyph *gp;
+
+	#if REFLOW_PATCH
+	/* selected() takes relative coordinates */
+	if (selected(term.c.x, term.c.y + term.scr))
+		selclear();
+	#else
+	if (selected(term.c.x, term.c.y))
+		selclear();
+	#endif // REFLOW_PATCH
+
+	gp = &term.line[term.c.y][term.c.x];
+	if (IS_SET(MODE_WRAP) && (term.c.state & CURSOR_WRAPNEXT)) {
+		gp->mode |= ATTR_WRAP;
+		tdirtcols(term.c.y, term.c.x, term.c.x + 1);
+		tnewline(1);
+		gp = &term.line[term.c.y][term.c.x];
+	}
+
+	if (IS_SET(MODE_INSERT) && term.c.x+width < term.col) {
+		memmove(gp+width, gp, (term.col - term.c.x - width) * sizeof(Glyph));
+		gp->mode &= ~ATTR_WIDE;
+		tdirtcols(term.c.y, term.c.x, term.col);
+	}
+
+	if (term.c.x+width > term.col) {
+		if (IS_SET(MODE_WRAP))
+			tnewline(1);
+		else
+			tmoveto(term.col - width, term.c.y);
+		gp = &term.line[term.c.y][term.c.x];
+	}
+
+	tsetchar(u, &term.c.attr, term.c.x, term.c.y);
+	#if OSC133_PATCH
+	term.c.attr.mode &= ~ATTR_FTCS_PROMPT;
+	#endif // OSC133_PATCH
+	term.lastc = u;
+
+	if (width == 2) {
+		tdirtcols(term.c.y, term.c.x, term.c.x + 3);
+		gp->mode |= ATTR_WIDE;
+		if (term.c.x+1 < term.col) {
+			if (gp[1].mode == ATTR_WIDE && term.c.x+2 < term.col) {
+				gp[2].u = ' ';
+				gp[2].mode &= ~ATTR_WDUMMY;
+			}
+			gp[1].u = '\0';
+			gp[1].mode = ATTR_WDUMMY;
+		}
+	}
+	if (term.c.x+width < term.col) {
+		tmoveto(term.c.x+width, term.c.y);
+	} else {
+		#if REFLOW_PATCH
+		term.wrapcwidth[IS_SET(MODE_ALTSCREEN)] = width;
+		#endif // REFLOW_PATCH
+		term.c.state |= CURSOR_WRAPNEXT;
+	}
+}
+
+/* Write a run that cannot wrap, translate characters, touch a selection or
+ * repair wide cells. Stop before any of those cases and let tputglyph handle
+ * it. This avoids repeating cursor/attribute/dirty bookkeeping per byte. */
+static int
+tputascii(const char *buf, int len)
+{
+	Glyph attr = term.c.attr;
+	Glyph *dst;
+	int n, limit;
+
+	if (sel.ob.x != -1 || IS_SET(MODE_INSERT) || term.c.state ||
+	    term.trantbl[term.charset] == CS_GRAPHIC0
+	    #if OSC133_PATCH
+	    || (attr.mode & ATTR_FTCS_PROMPT)
+	    #endif
+	   )
+		return 0;
+	limit = MIN(len, term.col - term.c.x - 1);
+	if (limit <= 0)
+		return 0;
+	dst = &term.line[term.c.y][term.c.x];
+	#if REFLOW_PATCH
+	attr.mode |= ATTR_SET;
+	#endif
+	for (n = 0; n < limit && BETWEEN((uchar)buf[n], 0x20, 0x7e) &&
+	     !(dst[n].mode & (ATTR_WIDE | ATTR_WDUMMY)); n++) {
+		dst[n] = attr;
+		dst[n].u = (uchar)buf[n];
+	}
+	if (n) {
+		tdirtcols(term.c.y, term.c.x, term.c.x + n);
+		term.c.x += n;
+		term.lastc = (uchar)buf[n - 1];
+	}
+	return n;
+}
+
 void
 tputc(Rune u)
 {
 	char c[UTF_SIZ];
 	int control;
 	int width, len;
-	Glyph *gp;
 
 	control = ISCONTROL(u);
 	if (u < 127 || !IS_SET(MODE_UTF8))
@@ -3588,60 +3755,7 @@ check_control_code:
 		return;
 	}
 
-	#if REFLOW_PATCH
-	/* selected() takes relative coordinates */
-	if (selected(term.c.x, term.c.y + term.scr))
-		selclear();
-	#else
-	if (selected(term.c.x, term.c.y))
-		selclear();
-	#endif // REFLOW_PATCH
-
-	gp = &term.line[term.c.y][term.c.x];
-	if (IS_SET(MODE_WRAP) && (term.c.state & CURSOR_WRAPNEXT)) {
-		gp->mode |= ATTR_WRAP;
-		tnewline(1);
-		gp = &term.line[term.c.y][term.c.x];
-	}
-
-	if (IS_SET(MODE_INSERT) && term.c.x+width < term.col) {
-		memmove(gp+width, gp, (term.col - term.c.x - width) * sizeof(Glyph));
-		gp->mode &= ~ATTR_WIDE;
-	}
-
-	if (term.c.x+width > term.col) {
-		if (IS_SET(MODE_WRAP))
-			tnewline(1);
-		else
-			tmoveto(term.col - width, term.c.y);
-		gp = &term.line[term.c.y][term.c.x];
-	}
-
-	tsetchar(u, &term.c.attr, term.c.x, term.c.y);
-	#if OSC133_PATCH
-	term.c.attr.mode &= ~ATTR_FTCS_PROMPT;
-	#endif // OSC133_PATCH
-	term.lastc = u;
-
-	if (width == 2) {
-		gp->mode |= ATTR_WIDE;
-		if (term.c.x+1 < term.col) {
-			if (gp[1].mode == ATTR_WIDE && term.c.x+2 < term.col) {
-				gp[2].u = ' ';
-				gp[2].mode &= ~ATTR_WDUMMY;
-			}
-			gp[1].u = '\0';
-			gp[1].mode = ATTR_WDUMMY;
-		}
-	}
-	if (term.c.x+width < term.col) {
-		tmoveto(term.c.x+width, term.c.y);
-	} else {
-		#if REFLOW_PATCH
-		term.wrapcwidth[IS_SET(MODE_ALTSCREEN)] = width;
-		#endif // REFLOW_PATCH
-		term.c.state |= CURSOR_WRAPNEXT;
-	}
+	tputglyph(u, width);
 }
 
 int
@@ -3661,18 +3775,15 @@ twrite(const char *buf, int buflen, int show_ctrl)
 		if (IS_SET(MODE_SIXEL) && sixel_st.state != PS_ESC) {
 			charsize = sixel_parser_parse(&sixel_st, (const unsigned char*)buf + n, buflen - n);
 			continue;
-		} else if (IS_SET(MODE_UTF8))
-		#else
-		if (IS_SET(MODE_UTF8))
+		}
 		#endif // SIXEL_PATCH
-		{
-			/* process a complete utf8 char */
+		u = (uchar)buf[n];
+		charsize = 1;
+		/* ASCII is already decoded in both UTF-8 and single-byte modes. */
+		if (u >= 0x80 && IS_SET(MODE_UTF8)) {
 			charsize = utf8decode(buf + n, &u, buflen - n);
 			if (charsize == 0)
 				break;
-		} else {
-			u = buf[n] & 0xFF;
-			charsize = 1;
 		}
 		#if SYNC_PATCH
 		if (su0 && !su) {
@@ -3680,6 +3791,16 @@ twrite(const char *buf, int buflen, int show_ctrl)
 			break;  // ESU - allow rendering before a new BSU
 		}
 		#endif // SYNC_PATCH
+		/* Ordinary ASCII can share bookkeeping over a whole run. Any special
+		 * cell or mode falls back to the full printable-character semantics. */
+		if (BETWEEN(u, 0x20, 0x7e) && !term.esc && !IS_SET(MODE_PRINT)) {
+			charsize = tputascii(buf + n, buflen - n);
+			if (!charsize) {
+				tputglyph(u, 1);
+				charsize = 1;
+			}
+			continue;
+		}
 		if (show_ctrl && ISCONTROL(u)) {
 			if (u & 0x80) {
 				u &= 0x7f;
@@ -3754,6 +3875,9 @@ tresize(int col, int row)
 	term.line = xrealloc(term.line, row * sizeof(Line));
 	term.alt  = xrealloc(term.alt,  row * sizeof(Line));
 	term.dirty = xrealloc(term.dirty, row * sizeof(*term.dirty));
+	term.dirtycols = xrealloc(term.dirtycols, row * sizeof(*term.dirtycols));
+	for (i = 0; i < row; i++)
+		term.dirty[i] = DIRTY_FULL;
 	term.tabs = xrealloc(term.tabs, col * sizeof(*term.tabs));
 
 	#if SCROLLBACK_PATCH
@@ -3876,12 +4000,12 @@ drawregion(int x1, int y1, int x2, int y2)
 		if (!term.dirty[y])
 			continue;
 
-		term.dirty[y] = 0;
 		#if SCROLLBACK_PATCH || REFLOW_PATCH
 		xdrawline(TLINE(y), x1, y, x2);
 		#else
 		xdrawline(term.line[y], x1, y, x2);
 		#endif // SCROLLBACK_PATCH
+		term.dirty[y] = 0;
 	}
 }
 

@@ -27,7 +27,7 @@ PROTO_H = $(PROTODIR)/xdg-shell-client-protocol.h \
 PROTO_C = $(PROTO_H:-client-protocol.h=-protocol.c)
 PROTO_O = $(PROTO_C:.c=.o)
 
-SRC = st.c wl.c $(LIGATURES_C) $(SIXEL_C)
+SRC = st.c wl.c patch/vec.c $(SIXEL_C)
 OBJ = $(SRC:.c=.o)
 
 all: st
@@ -74,14 +74,16 @@ $(PROTODIR)/text-input-unstable-v3-client-protocol.h $(PROTODIR)/text-input-unst
 $(PROTODIR):
 	mkdir -p $(PROTODIR)
 
-st.o: config.h st.h win.h
-wl.o: arg.h config.h st.h win.h patch/font2.c patch/font2.h patch/cursortrail.c \
+st.o: config.h st.h win.h patch/vec.h patch/reflow.c patch/reflow.h \
+      patch/keyboardselect_reflow_st.c patch/keyboardselect_reflow_st.h
+wl.o: arg.h config.h st.h win.h patch/cursortrail.c patch/vec.h \
+      patch/textrun.c patch/fcft.c \
       patch/boxdraw.c patch/boxdraw.h patch/powerline.c patch/boxextra.c \
       patch/boxlines_extra.c patch/boxblocks_extra.c patch/boxcircles.c \
 	patch/boxmosaics.c patch/boxbranch.c \
-      $(LIGATURES_H) $(PROTO_H)
-hb.o: st.h $(LIGATURES_H)
-sixel.o: st.h win.h sixel.h
+      $(PROTO_H)
+patch/vec.o: patch/vec.h
+sixel.o: st.h win.h sixel.h patch/vec.h
 
 $(OBJ): config.h config.mk patches.h
 
@@ -95,7 +97,8 @@ clean:
 dist: clean
 	mkdir -p st-$(VERSION)
 	cp -R FAQ LEGACY TODO LICENSE Makefile README config.mk\
-		config.def.h st.info st.1 arg.h st.h win.h $(LIGATURES_H) $(SRC)\
+		config.def.h patches.def.h patches.h st.info st.1 st.desktop st.png arg.h st.h win.h st.c wl.c\
+		sixel.c sixel.h sixel_hls.c sixel_hls.h patch\
 		st-$(VERSION)
 	tar -cf - st-$(VERSION) | gzip > st-$(VERSION).tar.gz
 	rm -rf st-$(VERSION)

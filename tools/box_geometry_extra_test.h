@@ -144,9 +144,9 @@ check_scaled_alpha(void)
 		for (unsigned k = 0; k < LEN(scales); k++) {
 			double s = scales[k];
 			clear_image();
-			cairo_save(xw.draw); cairo_scale(xw.draw,s,s);
+			vec_save(xw.draw); vec_scale(xw.draw,s,s);
 			render(u, PX, PY, 9, 17, 0);
-			cairo_restore(xw.draw);
+			vec_restore(xw.draw);
 			for (int y = 0; y < SH; y++) for (int x = 0; x < SW; x++)
 				if (x < floor(PX*s) || x >= ceil((PX+9)*s) ||
 				    y < floor(PY*s) || y >= ceil((PY+17)*s))

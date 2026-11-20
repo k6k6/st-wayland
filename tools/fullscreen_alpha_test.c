@@ -256,9 +256,8 @@ optionandfocus(void)
 static uint32_t
 pixel(int x, int y)
 {
-	cairo_surface_flush(xw.buf);
-	return ((uint32_t *)(cairo_image_surface_get_data(xw.buf) +
-		y * cairo_image_surface_get_stride(xw.buf)))[x];
+	return ((uint32_t *)((unsigned char *)pixman_image_get_data(xw.pix) +
+		y * pixman_image_get_stride(xw.pix)))[x];
 }
 
 static void
@@ -294,7 +293,7 @@ backgroundpixels(int fullscreen)
 		for (int i = 0; i < dc.collen; i++) samecolor(before[i], dc.col[i]);
 	}
 	free(before);
-	assert(cairo_status(xw.draw) == CAIRO_STATUS_SUCCESS);
+	assert(vec_status(xw.draw) == VEC_STATUS_SUCCESS);
 }
 
 int
@@ -317,11 +316,14 @@ main(void)
 	#if ALPHA_PATCH
 	optionandfocus(); osccolors();
 	#endif
-	xw.buf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, win.w, win.h);
-	xw.draw = cairo_create(xw.buf);
-	resetdrawstate();
+	xw.pix = pixman_image_create_bits(PIXMAN_a8r8g8b8, win.w, win.h, NULL, 0);
+	assert(xw.pix);
+	xw.draw = vec_create(xw.pix);
+	assert(xw.draw);
 	backgroundpixels(0); backgroundpixels(1); backgroundpixels(0);
-	cairo_destroy(xw.draw); cairo_surface_destroy(xw.buf); free(dc.col);
+	vec_destroy(xw.draw);
+	pixman_image_unref(xw.pix); xw.pix = NULL;
+	free(dc.col);
 	puts("PASS: configure/ack order, pending state, repeated/empty/maximized/zero/same-size states, full dirty, alpha/OSC/focus restoration, background/border pixels");
 	return 0;
 }

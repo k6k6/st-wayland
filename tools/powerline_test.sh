@@ -15,7 +15,9 @@ cp patches.h patches.test-base.h
 cat >>st.c <<'C'
 void powerline_test_setchar(Rune u, const Glyph *g) { tsetchar(u, g, 0, 0); }
 C
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
+test_cflags=${POWERLINE_TEST_CFLAGS:--O1 -g}
+test_ldflags=${POWERLINE_TEST_LDFLAGS:-}
 for variant in ligatures no-ligatures disabled; do
 	python3 - "$variant" <<'PY'
 from pathlib import Path
@@ -33,14 +35,14 @@ h = Path('st.h').read_text().replace('extern const int boxdraw, boxdraw_bold, bo
     'extern int boxdraw; extern const int boxdraw_bold, boxdraw_braille;')
 Path('st.h').write_text(h)
 PY
-	if ! make -s -j2 CFLAGS='-O1 -g' LDFLAGS='' >"build-$variant.log" 2>&1; then
+	if ! make -s -j2 CFLAGS="$test_cflags" LDFLAGS="$test_ldflags" >"build-$variant.log" 2>&1; then
 		cat "build-$variant.log" >&2
 		exit 1
 	fi
-	${CC:-cc} -O1 -g -DVERSION=\"test\" -Iprotocols \
+	${CC:-cc} $test_cflags $test_ldflags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/powerline_test.c \
-		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
-		$(pkg-config --libs $packages) -lm -lutil -lrt -o powerline-test
+		st.o patch/vec.o sixel.o sixel_hls.o protocols/*.o \
+		$(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o powerline-test
 	printf '%s: ' "$variant"
 	./powerline-test
  done

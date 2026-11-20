@@ -11,7 +11,7 @@ mkdir "$work/tools"
 cp "$root/tools/selection_snapshot_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 cflags=${CFLAGS:--O1 -g}
 ldflags=${LDFLAGS:-}
 for clipboard in 0 1; do
@@ -33,9 +33,9 @@ PY
 	fi
 	${CC:-cc} $cflags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/selection_snapshot_test.c \
-		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
+		st.o patch/vec.o sixel.o sixel_hls.o protocols/*.o \
 		$ldflags -Wl,--wrap=free -Wl,--wrap=write \
-		$(pkg-config --libs $packages) -lm -lutil -lrt -o selection-snapshot-test
+		$(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o selection-snapshot-test
 	printf 'CLIPBOARD_PATCH=%s:\n' "$clipboard"
 	./selection-snapshot-test
 done

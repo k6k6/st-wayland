@@ -11,7 +11,7 @@ mkdir "$work/tools"
 cp "$root/tools/cursortrail_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 # Optional exact reference: compile functions from the local kitty checkout.
 # Missing checkout skips only this comparison, never the renderer regressions.
 kitty_source=${KITTY_SOURCE:-"$root/../kitty"}
@@ -55,8 +55,8 @@ PY
 	fi
 	${CC:-cc} $cflags $reference_flags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/cursortrail_test.c \
-		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
-		$ldflags $(pkg-config --libs $packages) -lm -lutil -lrt -o cursortrail-test
+		st.o patch/vec.o sixel.o sixel_hls.o protocols/*.o \
+		$ldflags $(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o cursortrail-test
 	printf '%s: ' "$variant"
 	./cursortrail-test
 done

@@ -14,7 +14,7 @@ cp patches.h patches.test-base.h
 cat >>st.c <<'C'
 void box_geometry_test_setchar(Rune u, const Glyph *g) { tsetchar(u, g, 0, 0); }
 C
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 test_cflags=${BOX_GEOMETRY_TEST_CFLAGS:--O1 -g}
 test_ldflags=${BOX_GEOMETRY_TEST_LDFLAGS:-}
 for variant in ligatures no-ligatures no-branch disabled; do
@@ -42,8 +42,8 @@ PY
 	fi
 	${CC:-cc} $test_cflags $test_ldflags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/box_geometry_test.c \
-		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
-		$(pkg-config --libs $packages) -lm -lutil -lrt -o box-geometry-test
+		st.o patch/vec.o sixel.o sixel_hls.o protocols/*.o \
+		$(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o box-geometry-test
 	printf '%s: ' "$variant"
 	./box-geometry-test
 done

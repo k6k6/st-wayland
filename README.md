@@ -1,3 +1,19 @@
+This Wayland fork renders entirely in software using **fcft + pixman**: fcft handles fonts and shaping, FreeType rasterizes vector outlines, and pixman composites text, shapes, cursor trails and SIXEL directly into wl_shm buffers. Build dependencies are Wayland client/cursor libraries and protocols, xkbcommon, Fontconfig, FreeType, pixman, and fcft with text-run shaping support. Cairo and X11/xcb libraries are no longer needed by the build.
+
+The temporary renderer switch and the old Cairo/HarfBuzz implementation have been removed. Rendering and cache regressions are in `tools/vec_test.sh`, `tools/textrun_test.sh`, `tools/render_state_test.sh`, and the geometry/SIXEL/font tests.
+
+See [WAYLAND.md](WAYLAND.md) for configuration and [PIXMAN-FCFT-MIGRATION.md](PIXMAN-FCFT-MIGRATION.md) for migration status, validation and known display/performance differences.
+
+Repeated vector shapes reuse bounded coverage caches inspired by foot. See [FOOT-OPTIMIZATION.md](FOOT-OPTIMIZATION.md) for pixel checks, measurements and cache limits.
+
+Ordinary ASCII spans share cursor and dirty-state updates, and common CSI numbers use a bounded decimal parser. Reliable dirty-column ranges reduce text comparison and snapshot copying. With ligatures and wide glyphs enabled, small text and geometry edits preserve complete words and distant glyph overhang. A destination clip bounds vector output, including cached masks and alpha groups; very small cells and unsupported attributes retain full-row rendering. See [PERFORMANCE-ROUND4.md](PERFORMANCE-ROUND4.md) for local geometry updates and scrolling diagnostics, [PERFORMANCE-ROUND3.md](PERFORMANCE-ROUND3.md) for dirty-column tracking, [PERFORMANCE-ROUND2.md](PERFORMANCE-ROUND2.md) for parsing improvements, and [PERFORMANCE-OPTIMIZATION.md](PERFORMANCE-OPTIMIZATION.md) for the first round. Parser regressions are in `tools/parser_fast_test.sh`.
+
+History copying and keyboard search read compressed rows directly; search highlights only expand a repeated tail when individual cells must differ. After 30 seconds without text-run cache use, a single cleanup reduces that cache to its most recently used 1 MiB, retaining the existing active budget and font glyphs. See [MEMORY-ROUND5.md](MEMORY-ROUND5.md) for memory, search CPU and resume measurements.
+
+When the compositor withholds frame callbacks, fallback redraws gradually slow to one every two seconds while PTY parsing continues. Callbacks, window configuration and interaction restore normal pacing; visible unfocused windows and live previews keep updating. See [BACKGROUND-ROUND6.md](BACKGROUND-ROUND6.md) for background CPU measurements and recovery checks.
+
+Resizing reads compressed history directly and keeps completed reflow rows compact until they become visible. Heap reclamation is combined across resize events, and unused bold/italic font styles load on first use. See [MEMORY-ROUND7.md](MEMORY-ROUND7.md) for resize peaks, startup memory and first-use costs.
+
 Similar to [dwm-flexipatch](https://github.com/bakkeby/dwm-flexipatch) this st 0.9.3 (04ce0d6, 2026-06-29) project has a different take on st patching. It uses preprocessor directives to decide whether or not to include a patch during build time. Essentially this means that this build, for better or worse, contains both the patched _and_ the original code. The aim being that you can select which patches to include and the build will contain that code and nothing more.
 
 For example to include the `alpha` patch then you would only need to flip this setting from 0 to 1 in [patches.h](https://github.com/bakkeby/st-flexipatch/blob/master/patches.def.h):

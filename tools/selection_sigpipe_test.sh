@@ -35,7 +35,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 wayland_protocols=$(pkg-config --variable=pkgdatadir wayland-protocols)
 scanner=$(command -v wayland-scanner || true)
 
@@ -113,7 +113,7 @@ mv st st-control
 ${CC:-cc} $cflags -DVERSION=\"test\" -Iprotocols -I. \
 	$(pkg-config --cflags $packages) tools/selectionpeer.c \
 	protocols/xdg-shell-protocol.c protocols/primary-selection-unstable-v1-protocol.c \
-	$(pkg-config --libs $packages) -o selectionpeer
+	$(pkg-config --libs $packages) -lfcft -o selectionpeer
 ${CC:-cc} $cflags -Iprotocols \
 	$(pkg-config --cflags wayland-client) tools/pointerclick.c \
 	protocols/wlr-virtual-pointer-unstable-v1-protocol.c \

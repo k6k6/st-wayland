@@ -4,9 +4,10 @@
 #include <time.h>
 #include <sys/types.h>
 #include <xkbcommon/xkbcommon.h>
-#include <cairo.h>
+#include "patch/vec.h"
 #include <fontconfig/fontconfig.h>
 #include "patches.h"
+#include <fcft/fcft.h>
 
 /* forward declarations of wayland types used in XWindow */
 struct wl_display;
@@ -145,7 +146,7 @@ enum glyph_attribute {
 typedef struct _ImageList {
 	struct _ImageList *next, *prev;
 	unsigned char *pixels;
-	void *pixmap;
+	pixman_image_t *pixmap;
 	void *clipmask;
 	int width;
 	int height;
@@ -213,7 +214,7 @@ typedef struct {
 } Color;
 
 typedef struct {
-	cairo_scaled_font_t *font;
+	const struct fcft_glyph *imageglyph;
 	unsigned int glyph;
 	float x;
 	float y;
@@ -269,6 +270,11 @@ typedef struct {
 	int top, bot, n;
 } RowScroll;
 
+enum { DIRTY_NONE, DIRTY_FULL, DIRTY_PARTIAL };
+typedef struct {
+	int left, right; /* half-open source-column range */
+} DirtyRange;
+
 /* Internal representation of the screen */
 typedef struct {
 	int row;      /* nb row */
@@ -294,7 +300,8 @@ typedef struct {
 	int histn;    /* number of history entries */
 	int scr;      /* scroll back */
 	#endif // SCROLLBACK_PATCH | REFLOW_PATCH
-	int *dirty;   /* dirtyness of lines */
+	int *dirty;   /* 0 clean, 1 full/unknown, 2 has a reliable column range */
+	DirtyRange *dirtycols; /* indexed by visible row, like dirty */
 	TCursor c;    /* cursor */
 	int ocx;      /* old cursor col */
 	int ocy;      /* old cursor row */
@@ -394,8 +401,8 @@ typedef struct {
 	struct xkb_state *xkbstate;
 	uint32_t serial;  /* last input serial */
 	/* rendering */
-	cairo_surface_t *buf;   /* persistent off-screen drawing surface */
-	cairo_t *draw;
+	VecContext *draw;
+	pixman_image_t *pix; /* non-owning view of the current wl_shm buffer */
 	GlyphFontSpec *specbuf; /* font spec buffer used for rendering */
 	#if LIGATURES_PATCH
 	GlyphFontSeq *specseq;
@@ -461,8 +468,9 @@ typedef struct {
 	int badweight;
 	short lbearing;
 	short rbearing;
-	cairo_scaled_font_t *match;
-	FcFontSet *set;
+	struct fcft_font *match;
+	char **names;
+	size_t nfonts;
 	FcPattern *pattern;
 } Font;
 
@@ -496,6 +504,7 @@ int tkittykbdflags(void);
 void tnew(int, int);
 void tresize(int, int);
 void tsetdirtattr(int);
+void tsetdirtcols(int, int, int);
 void ttyhangup(void);
 int ttynew(const char *, char *, const char *, char **);
 size_t ttyread(void);
@@ -523,7 +532,7 @@ int xgetcolor(int x, unsigned char *r, unsigned char *g, unsigned char *b);
 #if BOXDRAW_PATCH
 int isboxdraw(Rune);
 ushort boxdrawindex(const Glyph *);
-void boxdraw_xinit(cairo_t *);
+void boxdraw_xinit(VecContext *);
 void drawboxes(int, int, int, int, Color *, Color *, const GlyphFontSpec *, int);
 #endif // BOXDRAW_PATCH
 

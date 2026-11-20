@@ -65,7 +65,7 @@ delete_image(ImageList *im)
 	if (im->next)
 		im->next->prev = im->prev;
 	if (im->pixmap)
-		cairo_surface_destroy((cairo_surface_t *)im->pixmap);
+		pixman_image_unref(im->pixmap);
 	free(im->pixels);
 	free(im);
 }

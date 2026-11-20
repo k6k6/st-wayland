@@ -5,7 +5,7 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static char* font = "Maple Mono NF CN:size=11:antialias=true:autohint=false";
+static char* font = "Maple Mono NF CN:size=11:antialias=true:autohint=true";
 #if FONT2_PATCH
 /* Spare fonts */
 static char* font2[] = {
@@ -117,9 +117,9 @@ static unsigned int cursorthickness = 2;
 
 #if CURSOR_TRAIL_PATCH
 /* Kitty-style trail: 0 disables; otherwise minimum cursor dwell in ms. */
-static unsigned int cursortrail = 1;
+static unsigned int cursortrail = 40;
 /* Fastest/slowest corner decay in ms (positive, slow >= fast). */
-static double cursortraildecay[2] = {100, 300};
+static double cursortraildecay[2] = {125, 250};
 /* Minimum horizontal OR vertical move in cells; 2 skips ordinary typing. */
 static int cursortrailthreshold = 3;
 #endif

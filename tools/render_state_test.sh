@@ -10,7 +10,7 @@ mkdir "$work/tools"
 cp "$root/tools/render_state_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 cflags=${CFLAGS:--O1 -g}
 ldflags=${LDFLAGS:-}
 for variant in enabled no-ligatures no-wide minimal no-reflow; do
@@ -34,8 +34,8 @@ PY
 	fi
 	${CC:-cc} $cflags -finstrument-functions -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/render_state_test.c \
-		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
-		$ldflags $(pkg-config --libs $packages) -lm -lutil -lrt -o render-state-test
+		st.o patch/vec.o sixel.o sixel_hls.o protocols/*.o \
+		$ldflags $(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o render-state-test
 	printf '%s: ' "$variant"
 	./render-state-test
 done

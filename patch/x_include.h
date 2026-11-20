@@ -14,9 +14,6 @@
 #if OPENCOPIED_PATCH
 #include "opencopied.h"
 #endif
-#if FONT2_PATCH
-#include "font2.h"
-#endif
 #if FULLSCREEN_PATCH
 #include "fullscreen_x.h"
 #endif

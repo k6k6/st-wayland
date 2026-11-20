@@ -54,33 +54,33 @@ boxextrarune(ushort index)
 }
 
 static void
-drawboxextra(cairo_t *cr, int x, int y, int w, int h,
+drawboxextra(VecContext *cr, int x, int y, int w, int h,
              const Color *fg, const Color *bg, ushort index)
 {
 	Rune u = boxextrarune(index);
-	cairo_path_t *previous_path;
+	VecPath *previous_path;
 
 	if (w <= 0 || h <= 0 || !isboxextra(u))
 		return;
-	previous_path = cairo_copy_path(cr);
-	cairo_save(cr);
-	/* Normal text leaves a cached clip on the shared Cairo context. */
-	cairo_reset_clip(cr);
-	cairo_new_path(cr);
-	cairo_rectangle(cr, x, y, w, h);
-	cairo_clip(cr);
-	cairo_translate(cr, x, y);
-	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-	cairo_set_antialias(cr, CAIRO_ANTIALIAS_GRAY);
-	cairo_set_source_rgba(cr, fg->color.red / 65535.0,
+	previous_path = vec_copy_path(cr);
+	vec_save(cr);
+	/* Normal text leaves a cached clip on the shared vector context. */
+	vec_reset_clip(cr);
+	vec_new_path(cr);
+	vec_rectangle(cr, x, y, w, h);
+	vec_clip(cr);
+	vec_translate(cr, x, y);
+	vec_set_operator(cr, VEC_OPERATOR_OVER);
+	vec_set_antialias(cr, VEC_ANTIALIAS_GRAY);
+	vec_set_source_rgba(cr, fg->color.red / 65535.0,
 	                     fg->color.green / 65535.0,
 	                     fg->color.blue / 65535.0,
 	                     fg->color.alpha / 65535.0);
-	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
-	cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
-	cairo_set_miter_limit(cr, 10);
-	cairo_set_dash(cr, NULL, 0, 0);
-	cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
+	vec_set_line_cap(cr, VEC_LINE_CAP_BUTT);
+	vec_set_line_join(cr, VEC_LINE_JOIN_MITER);
+	vec_set_miter_limit(cr, 10);
+	vec_set_dash(cr, NULL, 0, 0);
+	vec_set_fill_rule(cr, VEC_FILL_RULE_WINDING);
 	if (isboxlinesextra(u))
 		drawboxlinesextra(cr, w, h, u, !!(index & BDB));
 	else if (isboxblocksextra(u))
@@ -91,8 +91,8 @@ drawboxextra(cairo_t *cr, int x, int y, int w, int h,
 		drawboxbranch(cr, w, h, u, !!(index & BDB));
 	else
 		drawboxcircle(cr, w, h, u);
-	cairo_restore(cr);
-	cairo_new_path(cr);
-	cairo_append_path(cr, previous_path);
-	cairo_path_destroy(previous_path);
+	vec_restore(cr);
+	vec_new_path(cr);
+	vec_append_path(cr, previous_path);
+	vec_path_destroy(previous_path);
 }

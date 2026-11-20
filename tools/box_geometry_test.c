@@ -1,8 +1,9 @@
-/* Headless tests of production terminal tagging, encoding and Cairo drawing. */
+/* Headless tests of production terminal tagging, encoding and vector drawing. */
 #define main st_program_main
 #include "../wl.c"
 #undef main
 #include <assert.h>
+#define SPEC_FONT_UNUSED(s) ((s).imageglyph == NULL)
 #include "box_geometry_inventory.h"
 
 extern void box_geometry_test_setchar(Rune, const Glyph *);
@@ -48,7 +49,6 @@ check_specs(void)
 	Glyph glyphs[LEN(geometry_inventory)];
 	GlyphFontSpec specs[LEN(geometry_inventory)];
 	ushort seen[LEN(geometry_inventory)];
-	int before = frclen;
 	win.cw = 9;
 	win.ch = 19;
 	assert(dc.font.match == NULL && dc.bfont.match == NULL);
@@ -65,7 +65,7 @@ check_specs(void)
 	}
 	assert(xmakeglyphfontspecs(specs, glyphs, LEN(glyphs), 0, 0) == LEN(glyphs));
 	for (unsigned i = 0; i < LEN(glyphs); i++) {
-		assert(specs[i].font == NULL && specs[i].glyph == seen[i]);
+		assert(SPEC_FONT_UNUSED(specs[i]) && specs[i].glyph == seen[i]);
 		assert(specs[i].x == specs[0].x + i * win.cw);
 	}
 	/* Supplementary characters, old boxes, and double-width geometry coexist. */
@@ -75,7 +75,6 @@ check_specs(void)
 	                {.mode=ATTR_WDUMMY}};
 	assert(xmakeglyphfontspecs(specs, wide, 4, 0, 0) == 2);
 	assert(specs[1].x - specs[0].x == 2 * win.cw);
-	assert(frclen == before && frc == NULL);
 }
 
 #define SW 96
@@ -94,8 +93,8 @@ clear_image(void)
 static uint32_t
 pixel(int x, int y)
 {
-	return ((uint32_t *)(cairo_image_surface_get_data(xw.buf) +
-	         y * cairo_image_surface_get_stride(xw.buf)))[x];
+	return ((uint32_t *)((unsigned char *)pixman_image_get_data(xw.pix) +
+	         y * pixman_image_get_stride(xw.pix)))[x];
 }
 
 static void
@@ -104,8 +103,7 @@ render(Rune u, int x, int y, int w, int h, ushort style)
 	Glyph g = {.u=u, .mode=ATTR_BOXDRAW | style};
 	GlyphFontSpec spec = {.glyph=boxdrawindex(&g)};
 	drawboxes(x, y, w, h, &foreground, &background, &spec, 1);
-	assert(cairo_status(xw.draw) == CAIRO_STATUS_SUCCESS);
-	cairo_surface_flush(xw.buf);
+	assert(vec_status(xw.draw) == 0);
 }
 
 static void
@@ -195,14 +193,13 @@ check_tiling(void)
 	for (int y = 0; y < SH; y++) for (int x = 0; x < SW; x++)
 		tiled[y*SW+x] = pixel(x,y);
 	clear_image();
-	cairo_save(xw.draw);
-	cairo_set_source_rgb(xw.draw, 1, 1, 1);
-	cairo_set_antialias(xw.draw, CAIRO_ANTIALIAS_GRAY);
-	cairo_set_line_width(xw.draw, 1);
+	vec_save(xw.draw);
+	vec_set_source_rgb(xw.draw, 1, 1, 1);
+	vec_set_antialias(xw.draw, VEC_ANTIALIAS_GRAY);
+	vec_set_line_width(xw.draw, 1);
 	boxcircledisk(xw.draw, PX+18, PY+26, 17.5, 25.5, 0);
 	boxcircledisk(xw.draw, PX+18, PY+26, 8.5, 12.5, 0);
-	cairo_restore(xw.draw);
-	cairo_surface_flush(xw.buf);
+	vec_restore(xw.draw);
 	for (int y = 0; y < SH; y++) for (int x = 0; x < SW; x++)
 		assert(abs((int)(pixel(x,y)&255) - (int)(tiled[y*SW+x]&255)) <= 1);
 	/* Overlapping subpaths form a union, not multiple alpha applications. */
@@ -219,16 +216,16 @@ check_tiling(void)
 static void
 check_state(void)
 {
-	cairo_save(xw.draw);
-	cairo_rectangle(xw.draw, 0, 0, 1, 1);
-	cairo_clip(xw.draw);
-	cairo_set_operator(xw.draw, CAIRO_OPERATOR_CLEAR);
-	cairo_set_antialias(xw.draw, CAIRO_ANTIALIAS_NONE);
-	cairo_set_source_rgb(xw.draw, .2, .3, .4);
-	cairo_pattern_t *source = cairo_pattern_reference(cairo_get_source(xw.draw));
-	cairo_set_line_width(xw.draw, 11);
-	cairo_move_to(xw.draw, 3, 4);
-	cairo_line_to(xw.draw, 13, 14);
+	vec_save(xw.draw);
+	vec_rectangle(xw.draw, 0, 0, 1, 1);
+	vec_clip(xw.draw);
+	vec_set_operator(xw.draw, VEC_OPERATOR_CLEAR);
+	vec_set_antialias(xw.draw, VEC_ANTIALIAS_NONE);
+	vec_set_source_rgb(xw.draw, .2, .3, .4);
+	VecPattern *source = vec_pattern_reference(vec_get_source(xw.draw));
+	vec_set_line_width(xw.draw, 11);
+	vec_move_to(xw.draw, 3, 4);
+	vec_line_to(xw.draw, 13, 14);
 	for (unsigned i = 0; i < LEN(geometry_inventory); i++) {
 		Rune u = geometry_inventory[i];
 		if (!isboxextra(u)) continue;
@@ -238,24 +235,23 @@ check_state(void)
 		for (int y = PY; y < PY+32; y++) for (int x = PX; x < PX+16; x++)
 			nonempty |= pixel(x, y) != 0xff121212;
 		assert(nonempty);
-		assert(cairo_get_operator(xw.draw) == CAIRO_OPERATOR_CLEAR);
-		assert(cairo_get_antialias(xw.draw) == CAIRO_ANTIALIAS_NONE);
-		assert(cairo_get_source(xw.draw) == source);
-		assert(cairo_get_line_width(xw.draw) == 11);
+		assert(vec_get_operator(xw.draw) == VEC_OPERATOR_CLEAR);
+		assert(vec_get_antialias(xw.draw) == VEC_ANTIALIAS_NONE);
+		assert(vec_get_source(xw.draw) == source);
+		assert(vec_get_line_width(xw.draw) == 11);
 		double x1, y1, x2, y2;
-		cairo_clip_extents(xw.draw, &x1, &y1, &x2, &y2);
+		vec_clip_extents(xw.draw, &x1, &y1, &x2, &y2);
 		assert(x1 == 0 && y1 == 0 && x2 == 1 && y2 == 1);
-		cairo_path_extents(xw.draw, &x1, &y1, &x2, &y2);
+		vec_path_extents(xw.draw, &x1, &y1, &x2, &y2);
 		assert(x1 == 3 && y1 == 4 && x2 == 13 && y2 == 14);
 	}
-	cairo_pattern_destroy(source);
-	cairo_restore(xw.draw);
-	cairo_new_path(xw.draw);
+	vec_pattern_destroy(source);
+	vec_restore(xw.draw);
+	vec_new_path(xw.draw);
 	clear_image();
 	drawboxextra(xw.draw, PX, PY, 0, 32, NULL, NULL, boxextraindex(0x1fb00));
 	drawboxextra(xw.draw, PX, PY, 16, -1, NULL, NULL, boxextraindex(0x1fb00));
 	drawboxextra(xw.draw, PX, PY, 16, 32, NULL, NULL, BDX | 0xf00);
-	cairo_surface_flush(xw.buf);
 	for (int y = 0; y < SH; y++) for (int x = 0; x < SW; x++)
 		assert(pixel(x,y) == 0xff121212);
 }
@@ -276,8 +272,9 @@ main(void)
 	boxdraw = 1;
 	check_all_routes();
 	check_specs();
-	xw.buf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, SW, SH);
-	xw.draw = cairo_create(xw.buf);
+	xw.pix = pixman_image_create_bits(PIXMAN_a8r8g8b8, SW, SH, NULL, 0);
+	assert(xw.pix);
+	xw.draw = vec_create(xw.pix);
 	boxdraw_xinit(xw.draw);
 	check_pixels();
 	check_tiling();
@@ -285,8 +282,9 @@ main(void)
 	check_branch_semantics();
 	check_scaled_alpha();
 	check_state();
-	cairo_destroy(xw.draw);
-	cairo_surface_destroy(xw.buf);
+	vec_destroy(xw.draw);
+
+	pixman_image_unref(xw.pix); xw.pix = NULL;
 	printf("PASS: %zu geometry scalars, supplementary encoding, font-free specs, state/clip, exclusions\n", LEN(geometry_inventory));
 	#else
 	check_tagging(0);

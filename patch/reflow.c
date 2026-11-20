@@ -1,6 +1,6 @@
 /* History stores a prefix including one copy of its repeated final cell.
- * Screen rows stay full width; readers expand history in place. No reader's
- * pointer moves again until the event loop finishes and calls thistcompact(). */
+ * Read-only scans use a compact view; display/editing expands rows in place.
+ * No expanded row moves again until the event loop calls thistcompact(). */
 static int histaccessed; /* nothing to compact during ordinary output/typing */
 
 static int
@@ -50,6 +50,49 @@ thistline(int i)
 		histaccessed = 1;
 	}
 	return line;
+}
+
+static LineView
+tlineview(int y)
+{
+	if (y < term.scr) {
+		int i = (term.histi + y - term.scr + 1 + HISTSIZE) % HISTSIZE;
+		return (LineView){term.hist[i], abs(term.histlen[i])};
+	}
+	return (LineView){term.line[y - term.scr], term.col};
+}
+
+static const Glyph *
+tviewcell(LineView view, int x)
+{
+	return &view.line[MIN(x, view.stored - 1)];
+}
+
+static void
+tviewcopy(Line dst, LineView view, int x, int count)
+{
+	int copied = MIN(count, MAX(view.stored - x, 0));
+
+	if (copied)
+		memcpy(dst, view.line + x, copied * sizeof(Glyph));
+	for (int i = copied; i < count; i++)
+		dst[i] = view.line[view.stored - 1];
+}
+
+/* The same logical line ending as tlinelen(), without reading/allocating
+ * the repeated tail one cell at a time. */
+static int
+tviewlen(LineView view)
+{
+	int i = term.col - 1;
+	while (i >= 0) {
+		const Glyph *g = tviewcell(view, i);
+		if (IS_SET(MODE_ALTSCREEN) ? (g->mode & ATTR_WRAP) || g->u != ' '
+		                          : (g->mode & (ATTR_SET | ATTR_WRAP)))
+			break;
+		i = i >= view.stored ? view.stored - 1 : i - 1;
+	}
+	return i + 1;
 }
 
 /* Safe boundary: all event handlers and painters have returned. Keep visible
@@ -171,6 +214,31 @@ treflow_moveimages(int oldy, int newy)
 }
 #endif // SIXEL_PATCH
 
+/* Reflow keeps completed rows packed, including those which might eventually
+ * become visible. Only one unfinished output row needs full-width storage. */
+static void
+treflowstore(LineView *dst, Line line, int col)
+{
+	int len = thistlength(line, col);
+
+	dst->line = xrealloc(dst->line, len * sizeof(Glyph));
+	memcpy(dst->line, line, len * sizeof(Glyph));
+	dst->stored = len;
+}
+
+static Line
+treflowexpand(LineView view, int col)
+{
+	Line line = view.line;
+
+	if (view.stored < col) {
+		line = xrealloc(line, col * sizeof(Glyph));
+		for (int x = view.stored; x < col; x++)
+			line[x] = line[view.stored - 1];
+	}
+	return line;
+}
+
 void
 treflow(int col, int row)
 {
@@ -179,7 +247,9 @@ treflow(int col, int row)
 	int ox = 0, oy = -term.histf, nx = 0, ny = -1, len;
 	int cy = -1; /* proxy for new y coordinate of cursor */
 	int buflen, nlines;
-	Line *buf, bufline, line;
+	LineView *buf, view = {0};
+	Line bufline, line;
+	Glyph blank = {0};
 	#if SIXEL_PATCH
 	ImageList *im, *next;
 
@@ -192,13 +262,16 @@ treflow(int col, int row)
 	                     tiswrapped(term.line[oce]); oce++);
 
 	nlines = HISTSIZE + row;
-	buf = xmalloc(nlines * sizeof(Line));
+	buf = xmalloc(nlines * sizeof(*buf));
+	memset(buf, 0, nlines * sizeof(*buf));
+	bufline = xmalloc(col * sizeof(Glyph));
+	tclearglyph(&blank, 0);
 	do {
-		if (!nx && ++ny < nlines)
-			buf[ny] = xmalloc(col * sizeof(Glyph));
+		if (!nx)
+			++ny;
 		if (!ox) {
-			line = TLINEABS(oy);
-			len = tlinelen(line);
+			view = tlineview(oy + term.scr);
+			len = tviewlen(view);
 		}
 		if (oy == term.c.y) {
 			if (!ox)
@@ -210,13 +283,12 @@ treflow(int col, int row)
 			}
 		}
 		/* get reflowed lines in buf */
-		bufline = buf[ny % nlines];
 		if (col - nx > len - ox) {
-			memcpy(&bufline[nx], &line[ox], (len-ox) * sizeof(Glyph));
+			tviewcopy(&bufline[nx], view, ox, len - ox);
 			nx += len - ox;
-			if (len == 0 || !(line[len - 1].mode & ATTR_WRAP)) {
+			if (len == 0 || !(tviewcell(view, len - 1)->mode & ATTR_WRAP)) {
 				for (j = nx; j < col; j++)
-					tclearglyph(&bufline[j], 0);
+					bufline[j] = blank;
 				#if SIXEL_PATCH
 				treflow_moveimages(oy+term.scr, ny);
 				#endif // SIXEL_PATCH
@@ -226,16 +298,16 @@ treflow(int col, int row)
 			}
 			ox = 0, oy++;
 		} else if (col - nx == len - ox) {
-			memcpy(&bufline[nx], &line[ox], (col-nx) * sizeof(Glyph));
+			tviewcopy(&bufline[nx], view, ox, col - nx);
 			#if SIXEL_PATCH
 			treflow_moveimages(oy+term.scr, ny);
 			#endif // SIXEL_PATCH
 			ox = 0, oy++, nx = 0;
 		} else/* if (col - nx < len - ox) */ {
-			memcpy(&bufline[nx], &line[ox], (col-nx) * sizeof(Glyph));
+			tviewcopy(&bufline[nx], view, ox, col - nx);
 			if (bufline[col - 1].mode & ATTR_WIDE) {
 				bufline[col - 2].mode |= ATTR_WRAP;
-				tclearglyph(&bufline[col - 1], 0);
+				bufline[col - 1] = blank;
 				ox--;
 			} else {
 				bufline[col - 1].mode |= ATTR_WRAP;
@@ -246,10 +318,15 @@ treflow(int col, int row)
 			ox += col - nx;
 			nx = 0;
 		}
+		if (!nx)
+			treflowstore(&buf[ny % nlines], bufline, col);
 	} while (oy <= oce);
-	if (nx)
+	if (nx) {
 		for (j = nx; j < col; j++)
-			tclearglyph(&bufline[j], 0);
+			bufline[j] = blank;
+		treflowstore(&buf[ny % nlines], bufline, col);
+	}
+	free(bufline);
 
 	/* free extra lines */
 	for (i = row; i < term.row; i++)
@@ -268,7 +345,7 @@ treflow(int col, int row)
 		j = nce, nce = MIN(nce + -term.c.y, bot);
 		term.c.y += nce - j;
 		while (term.c.y < 0) {
-			free(buf[ny-- % nlines]);
+			free(buf[ny-- % nlines].line);
 			buflen--;
 			term.c.y++;
 		}
@@ -284,16 +361,18 @@ treflow(int col, int row)
 	}
 	/* fill visible area */
 	for (/*i = nce */; i >= term.row; i--, ny--, buflen--)
-		term.line[i] = buf[ny % nlines];
+		term.line[i] = treflowexpand(buf[ny % nlines], col);
 	for (/*i = term.row - 1 */; i >= 0; i--, ny--, buflen--) {
 		free(term.line[i]);
-		term.line[i] = buf[ny % nlines];
+		term.line[i] = treflowexpand(buf[ny % nlines], col);
 	}
 	/* fill lines in history buffer and update term.histf */
 	for (/*i = -1 */; buflen > 0 && i >= -HISTSIZE; i--, ny--, buflen--) {
 		j = (term.histi + i + 1 + HISTSIZE) % HISTSIZE;
-		thiststore(j, buf[ny % nlines], col);
-		free(buf[ny % nlines]);
+		free(term.hist[j]);
+		term.hist[j] = buf[ny % nlines].line;
+		term.histlen[j] = buf[ny % nlines].stored;
+		term.histcols[j] = col;
 	}
 	term.histf = -i - 1;
 	term.scr = MIN(term.scr, term.histf);
@@ -330,7 +409,7 @@ treflow(int col, int row)
 	#endif // SIXEL_PATCH
 
 	for (; buflen > 0; ny--, buflen--)
-		free(buf[ny % nlines]);
+		free(buf[ny % nlines].line);
 	free(buf);
 }
 
@@ -595,8 +674,14 @@ tscrolldirt(int top, int bot, int n)
 		m = h;
 	} else if (n > 0) {
 		memmove(&term.dirty[top], &term.dirty[top + m], (h - m) * sizeof(*term.dirty));
+		if (term.dirtycols)
+			memmove(&term.dirtycols[top], &term.dirtycols[top + m],
+			        (h - m) * sizeof(*term.dirtycols));
 	} else {
 		memmove(&term.dirty[top + m], &term.dirty[top], (h - m) * sizeof(*term.dirty));
+		if (term.dirtycols)
+			memmove(&term.dirtycols[top + m], &term.dirtycols[top],
+			        (h - m) * sizeof(*term.dirtycols));
 	}
 	for (i = n > 0 ? bot - m + 1 : top; m > 0; m--)
 		term.dirty[i++] = 1;
@@ -790,6 +875,7 @@ tresize(int col, int row)
 	#endif // KEYBOARDSELECT_PATCH
 
 	term.dirty = xrealloc(term.dirty, row * sizeof(*term.dirty));
+	term.dirtycols = xrealloc(term.dirtycols, row * sizeof(*term.dirtycols));
 	term.tabs = xrealloc(term.tabs, col * sizeof(*term.tabs));
 	if (col > term.col) {
 		bp = term.tabs + term.col;
@@ -816,7 +902,7 @@ tclearregion(int x1, int y1, int x2, int y2, int usecurattr)
 		selclear();
 
 	for (y = y1; y <= y2; y++) {
-		TDIRTLINE(y);
+		tdirtcols(y, x1, x2 + 1);
 		for (x = x1; x <= x2; x++)
 			tclearglyph(&term.line[y][x], usecurattr);
 	}
@@ -834,6 +920,9 @@ tnew(int col, int row)
 		tswapscreen();
 	}
 	term.dirty = xmalloc(row * sizeof(*term.dirty));
+	term.dirtycols = xmalloc(row * sizeof(*term.dirtycols));
+	for (i = 0; i < row; i++)
+		term.dirty[i] = DIRTY_FULL;
 	term.tabs = xmalloc(col * sizeof(*term.tabs));
 	/* scrollback lines are allocated lazily when content scrolls into them */
 	for (i = 0; i < HISTSIZE; i++) {
@@ -859,6 +948,7 @@ tdeletechar(int n)
 		line = term.line[term.c.y];
 		memmove(&line[dst], &line[src], size * sizeof(Glyph));
 	}
+	tdirtcols(term.c.y, dst, term.col);
 	tclearregion(dst + size, term.c.y, term.col - 1, term.c.y, 1);
 }
 
@@ -878,6 +968,7 @@ tinsertblank(int n)
 		line = term.line[term.c.y];
 		memmove(&line[dst], &line[src], size * sizeof(Glyph));
 	}
+	tdirtcols(term.c.y, src, term.col);
 	tclearregion(src, term.c.y, dst - 1, term.c.y, 1);
 }
 
@@ -1066,7 +1157,7 @@ char *
 getsel(void)
 {
 	char *str, *ptr;
-	int y, lastx, linelen;
+	int x, y, firstx, lastx, linelen;
 	const Glyph *gp, *lgp;
 
 	if (sel.ob.x == -1 || sel.alt != IS_SET(MODE_ALTSCREEN))
@@ -1077,23 +1168,27 @@ getsel(void)
 
 	/* append every set & selected glyph to the selection */
 	for (y = sel.nb.y; y <= sel.ne.y; y++) {
-		Line line = TLINE(y);
+		LineView view = tlineview(y);
 
-		if ((linelen = tlinelen(line)) == 0) {
+		if ((linelen = tviewlen(view)) == 0) {
 			*ptr++ = '\n';
 			continue;
 		}
 
 		if (sel.type == SEL_RECTANGULAR) {
-			gp = &line[sel.nb.x];
+			firstx = sel.nb.x;
 			lastx = sel.ne.x;
 		} else {
-			gp = &line[sel.nb.y == y ? sel.nb.x : 0];
+			firstx = sel.nb.y == y ? sel.nb.x : 0;
 			lastx = (sel.ne.y == y) ? sel.ne.x : term.col-1;
 		}
-		lgp = &line[MIN(lastx, linelen-1)];
+		lgp = tviewcell(view, MIN(lastx, linelen-1));
 
-		ptr = tgetglyphs(ptr, gp, lgp);
+		for (x = firstx; x <= MIN(lastx, linelen-1); x++) {
+			gp = tviewcell(view, x);
+			if (!(gp->mode & ATTR_WDUMMY))
+				ptr += utf8encode(gp->u, ptr);
+		}
 		/*
 		 * Copy and pasting of line endings is inconsistent
 		 * in the inconsistent terminal and GUI world.

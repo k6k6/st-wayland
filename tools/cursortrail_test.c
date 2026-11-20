@@ -40,7 +40,7 @@ paint(long ms)
 {
 	struct timespec now = stamp(ms);
 	trailpaint(&now);
-	assert(cairo_status(xw.draw) == CAIRO_STATUS_SUCCESS);
+	assert(vec_status(xw.draw) == VEC_STATUS_SUCCESS);
 }
 
 static void
@@ -334,9 +334,8 @@ shapes(void)
 static uint32_t
 pixel(int x, int y)
 {
-	cairo_surface_flush(xw.buf);
-	return ((uint32_t *)(cairo_image_surface_get_data(xw.buf) +
-		y * cairo_image_surface_get_stride(xw.buf)))[x];
+	return ((uint32_t *)((unsigned char *)pixman_image_get_data(xw.pix) +
+		y * pixman_image_get_stride(xw.pix)))[x];
 }
 
 static void
@@ -549,10 +548,10 @@ rendercursor(int x, int y, int ox, int oy)
 static void
 finishfake(void)
 {
-	cairo_surface_flush(xw.buf);
 	lastbuf = curbuf;
 	damageclear(&lastbuf->damage);
-	curbuf = NULL; xw.buf = NULL; xw.draw = NULL;
+	curbuf = NULL; xw.draw = NULL;
+	xw.pix = NULL;
 }
 
 static void
@@ -574,8 +573,7 @@ restoration(void)
 	drawregion(0, 0, COLS, ROWS);
 	rendercursor(ox, oy, ox, oy);
 	reference = xmalloc(size);
-	cairo_surface_flush(xw.buf);
-	memcpy(reference, cairo_image_surface_get_data(xw.buf), size);
+	memcpy(reference, (unsigned char *)pixman_image_get_data(xw.pix), size);
 	jump(); paint(130); assert(trail.painted);
 	finishfake();
 
@@ -588,8 +586,7 @@ restoration(void)
 	drawregion(0, 0, COLS, ROWS);
 	rendercursor(ox, oy, ox, oy);
 	paint(600);
-	cairo_surface_flush(xw.buf);
-	assert(!memcmp(reference, cairo_image_surface_get_data(xw.buf), size));
+	assert(!memcmp(reference, (unsigned char *)pixman_image_get_data(xw.pix), size));
 	assert(!trailneedsframe());
 	finishfake();
 	buffers[0].busy = 0;
@@ -614,9 +611,6 @@ main(void)
 {
 	assert(FcInit());
 	xw.scale = 1;
-	#if LIGATURES_PATCH
-	hbcreatebuffer();
-	#endif
 	xloadfonts("DejaVu Sans Mono:pixelsize=16", 0);
 	xloadcols();
 	term.row = ROWS; term.col = COLS; term.dirty = dirty; term.line = lines;
@@ -641,9 +635,11 @@ main(void)
 		b->width = win.w; b->height = win.h; b->stride = win.w * 4;
 		b->size = (size_t)b->stride * b->height;
 		b->data = calloc(1, b->size); assert(b->data);
-		b->surface = cairo_image_surface_create_for_data(b->data,
-			CAIRO_FORMAT_ARGB32, win.w, win.h, b->stride);
-		b->cr = cairo_create(b->surface);
+		b->pix = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8,
+			b->width, b->height, b->data, b->stride);
+		assert(b->pix);
+		b->cr = vec_create(b->pix);
+		assert(b->cr);
 		damageadd(&b->damage, (DamageRect){0, 0, win.w, win.h});
 	}
 	/* The unused slot also has a sentinel, so shortage tests never allocate. */
@@ -656,15 +652,17 @@ main(void)
 	kittyreference();
 	#endif
 	for (int i = 0; i < 2; i++) {
-		cairo_destroy(buffers[i].cr); cairo_surface_destroy(buffers[i].surface);
+		vec_destroy(buffers[i].cr);
+		pixman_image_unref(buffers[i].pix);
 		free(buffers[i].data);
 	}
 	free(xw.specbuf);
 	#if LIGATURES_PATCH
-	free(xw.specseq); free(restoredrows); hbdestroybuffer();
+	free(xw.specseq); free(restoredrows);
 	#endif
-	xunloadfonts(); free(frc); free(dc.col);
-	cairo_debug_reset_static_data(); FcFini();
+	xunloadfonts(); free(dc.col);
+	fcft_fini();
+	FcFini();
 	puts("PASS: exponential chase/retarget, quad/opacity, styles/contexts, TUI screen entry, "
 	     "mode-switch retarget, pixels/clipping/damage, text/ligature restoration, "
 	     "buffer rotation/shortage, idle");

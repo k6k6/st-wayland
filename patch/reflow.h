@@ -7,6 +7,16 @@
 	(y) < 0 ? thistline((term.histi + (y) + 1 + HISTSIZE) % HISTSIZE) : term.line[(y)] \
 )
 
+/* A read-only row may end with one cell representing a repeated tail. Views
+ * remain valid until that row is changed or the event-loop compaction runs. */
+typedef struct {
+	Line line;
+	int stored;
+} LineView;
+static LineView tlineview(int);
+static const Glyph *tviewcell(LineView, int);
+static int tviewlen(LineView);
+
 /* term.dirty is indexed by rows of the view, which term.scr moves over the screen */
 #define TDIRTLINE(y) do { \
 	if ((y) + term.scr < term.row) \

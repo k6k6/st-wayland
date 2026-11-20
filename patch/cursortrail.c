@@ -2,7 +2,7 @@
  * Software cursor trail following kitty's per-frame exponential corner chase
  * (kitty/cursor_trail.c), in normalized viewport coordinates. Only the four
  * moving corners are painted; the live cursor rectangle is masked out.
- * Included only by wl.c, not the retained X11 backend. No heap allocations.
+ * Included only by wl.c, not the retained X11 backend.
  */
 typedef struct { double x, y; } TrailPoint;
 static struct {
@@ -258,21 +258,16 @@ trailupdate(int cx, int cy, Glyph g, Color color, const struct timespec *nowp)
 	trail.color = color;
 }
 
-/* Match kitty's triangle fan (TR, BR, BL, TL), including folded corners on
- * reversals. Give both triangles the same winding so Cairo fills their union
- * without a seam or a hole where the two triangles overlap. */
-static void
+/* Match kitty's triangle fan, including folded corners on reversals.
+ * Both triangles accumulate into one coverage mask before blending. */
+static pixman_triangle_t
 trailtriangle(int a, int b, int c)
 {
-	TrailPoint p = trail.corner[a], q = trail.corner[b], r = trail.corner[c], tmp;
-
-	if ((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x) < 0) {
-		tmp = q; q = r; r = tmp;
-	}
-	cairo_move_to(xw.draw, p.x, p.y);
-	cairo_line_to(xw.draw, q.x, q.y);
-	cairo_line_to(xw.draw, r.x, r.y);
-	cairo_close_path(xw.draw);
+	TrailPoint p = trail.corner[a], q = trail.corner[b], r = trail.corner[c];
+	return (pixman_triangle_t){
+		{pixman_double_to_fixed(p.x), pixman_double_to_fixed(p.y)},
+		{pixman_double_to_fixed(q.x), pixman_double_to_fixed(q.y)},
+		{pixman_double_to_fixed(r.x), pixman_double_to_fixed(r.y)}};
 }
 
 static void
@@ -301,7 +296,7 @@ trailpaint(const struct timespec *nowp)
 		return;
 	}
 	trailadvance(nowp);
-	if (!trail.active || !xw.draw)
+	if (!trail.active || !xw.pix)
 		return;
 	#if ANYSIZE_PATCH
 	bw = win.hborderpx; bh = win.vborderpx;
@@ -320,26 +315,29 @@ trailpaint(const struct timespec *nowp)
 	trail.y2 = MIN(MIN(win.h, bh + win.th), (int)ceil(bottom));
 	if (trail.x1 >= trail.x2 || trail.y1 >= trail.y2)
 		return;
-	resetclip();
-	cairo_save(xw.draw);
-	/* kitty masks only the live cursor rectangle, including thin shapes. */
-	cairo_rectangle(xw.draw, bw, bh, win.tw, win.th);
-	cairo_rectangle(xw.draw, trail.target[0].x, trail.target[0].y,
-		trail.target[2].x - trail.target[0].x,
-		trail.target[2].y - trail.target[0].y);
-	cairo_set_fill_rule(xw.draw, CAIRO_FILL_RULE_EVEN_ODD);
-	cairo_clip(xw.draw);
-	cairo_set_fill_rule(xw.draw, CAIRO_FILL_RULE_WINDING);
-	cairo_set_antialias(xw.draw, CAIRO_ANTIALIAS_DEFAULT);
-	cairo_set_operator(xw.draw, CAIRO_OPERATOR_OVER);
-	/* A visible cursor's trail has full opacity, independent of its distance
-	 * and the terminal background alpha (kitty's trail_color is RGB). */
-	cairo_set_source_rgb(xw.draw, trail.color.color.red / 65535.0,
-		trail.color.color.green / 65535.0, trail.color.color.blue / 65535.0);
-	trailtriangle(1, 2, 3);
-	trailtriangle(1, 3, 0);
-	cairo_fill(xw.draw);
-	cairo_restore(xw.draw);
+	pixman_region32_t clip, cursor;
+	pixman_triangle_t triangles[] = {trailtriangle(1, 2, 3), trailtriangle(1, 3, 0)};
+	pixman_color_t color = {trail.color.color.red, trail.color.color.green,
+		trail.color.color.blue, 0xffff};
+	pixman_image_t *solid = pixman_image_create_solid_fill(&color);
+	if (!solid)
+		die("could not allocate cursor trail color\n");
+	pixman_region32_init_rect(&clip, trail.x1, trail.y1,
+		trail.x2 - trail.x1, trail.y2 - trail.y1);
+	/* The live cursor edges are integer cell coordinates. Exclude only that
+	 * rectangle, including thin underline/bar styles, as kitty does. */
+	pixman_region32_init_rect(&cursor, (int)trail.target[0].x, (int)trail.target[0].y,
+		(int)(trail.target[2].x - trail.target[0].x),
+		(int)(trail.target[2].y - trail.target[0].y));
+	if (!pixman_region32_subtract(&clip, &clip, &cursor) ||
+	    !pixman_image_set_clip_region32(xw.pix, &clip))
+		die("could not allocate cursor trail clip\n");
+	pixman_composite_triangles(PIXMAN_OP_OVER, solid, xw.pix, PIXMAN_a8,
+		0, 0, 0, 0, LEN(triangles), triangles);
+	pixman_image_set_clip_region32(xw.pix, NULL);
+	pixman_region32_fini(&cursor);
+	pixman_region32_fini(&clip);
+	pixman_image_unref(solid);
 	adddamage(trail.x1, trail.y1, trail.x2 - trail.x1, trail.y2 - trail.y1);
 	trail.painted = 1;
 }

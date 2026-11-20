@@ -1,5 +1,5 @@
 #!/bin/sh
-# Real SIXEL parser and Cairo cache, no Wayland display or fonts needed.
+# Real SIXEL parser and pixman cache, no Wayland display or fonts needed.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/st-sixel-cache-test.XXXXXX")
@@ -10,7 +10,7 @@ mkdir "$work/tools"
 cp "$root/tools/sixel_cache_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 cflags=${CFLAGS:--O1 -g}
 ldflags=${LDFLAGS:-}
 for variant in enabled no-anysize disabled; do
@@ -36,8 +36,8 @@ PY
 	fi
 	${CC:-cc} $cflags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/sixel_cache_test.c \
-		st.o hb.o $sixel_objects protocols/*.o \
-		$ldflags $(pkg-config --libs $packages) -lm -lutil -lrt -o sixel-cache-test
+		st.o patch/vec.o $sixel_objects protocols/*.o \
+		$ldflags $(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o sixel-cache-test
 	printf '%s: ' "$variant"
 	./sixel-cache-test
 done

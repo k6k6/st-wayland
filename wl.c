@@ -1,7 +1,8 @@
 /* See LICENSE for license details. */
 /*
- * Wayland backend for st. Rendering is done in software with cairo into
- * wl_shm buffers, keyboard input is translated with xkbcommon.
+ * Wayland backend for st. Software rendering into wl_shm buffers uses
+ * fcft for text, FreeType for vector outlines and pixman for composition.
+ * Keyboard input is translated with xkbcommon.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -27,11 +28,7 @@
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include <xkbcommon/xkbcommon.h>
-#include <cairo.h>
-#include <cairo-ft.h>
 #include <fontconfig/fontconfig.h>
-#include <ft2build.h>
-#include FT_FREETYPE_H
 
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
@@ -46,9 +43,6 @@ char *argv0;
 #include "arg.h"
 #include "st.h"
 #include "win.h"
-#if LIGATURES_PATCH
-#include "hb.h"
-#endif // LIGATURES_PATCH
 
 #if SIXEL_PATCH
 #include "sixel.h"
@@ -140,8 +134,8 @@ typedef struct {
 	int busy;		/* held by the compositor */
 	struct timespec used;	/* when it was last committed */
 	DamageRegion damage;	/* changes since the compositor last saw this buffer */
-	cairo_surface_t *surface;
-	cairo_t *cr;
+	VecContext *cr;
+	pixman_image_t *pix; /* wraps data; owns no pixels */
 } ShmBuffer;
 
 static inline ushort sixd_to_16bit(int);
@@ -153,9 +147,6 @@ static void xdrawglyphfontspecs(const GlyphFontSpec *, Glyph, int, int, int, int
 #else
 static void xdrawglyphfontspecs(const GlyphFontSpec *, Glyph, int, int, int);
 #endif // WIDE_GLYPHS_PATCH | LIGATURES_PATCH
-#if LIGATURES_PATCH
-static inline void xresetfontsettings(uint32_t mode, Font **font, int *frcflags);
-#endif // LIGATURES_PATCH
 void xdrawglyph(Glyph, int, int);
 static void xclear(int, int, int, int);
 static void xinit(int, int);
@@ -167,6 +158,8 @@ static int xloadfont(Font *, FcPattern *);
 static void xloadfonts(const char *, double);
 static void xunloadfont(Font *);
 static void xunloadfonts(void);
+static void fcftcache_endframe(void);
+static void fcftdraw(Color *, const GlyphFontSpec *, int, int, int, int, int);
 static void xsetenv(void);
 static int evcol(MouseEvent *);
 static int evrow(MouseEvent *);
@@ -189,13 +182,11 @@ static int match(uint, uint);
 
 static void drawrect(Color *, int, int, int, int);
 static void drawglyphs(Color *, const GlyphFontSpec *, int, int, int, int, int);
-static void resetdrawstate(void);
 static void resetclip(void);
 void wlfillrect(const Color *, int, int, int, int);
 static void adddamage(int, int, int, int);
 static inline uint32_t premulpixel(const Color *);
 static void present(void);
-static unsigned int glyphindex(cairo_scaled_font_t *, Rune);
 static void updatesize(void);
 #if CURSOR_TRAIL_PATCH
 static void trailreset(void);
@@ -220,33 +211,6 @@ static int tstki; /* title stack index */
 static char *titlestack[TITLESTACKSIZE]; /* title stack */
 #endif // CSI_22_23_PATCH
 
-/* Font Ring Cache */
-enum {
-	FRC_NORMAL,
-	FRC_ITALIC,
-	FRC_BOLD,
-	FRC_ITALICBOLD
-};
-
-typedef struct {
-	cairo_scaled_font_t *font;
-	int flags;
-} Fontcache;
-
-/* Fonts retain priority order; rune results (including misses) are bounded. */
-#define FALLBACK_RESULTS 1024
-typedef struct {
-	Font *source;
-	Rune rune;
-	unsigned int glyph;
-	int index, generation;
-} FallbackResult;
-static FallbackResult fallbackresults[FALLBACK_RESULTS];
-
-/* Fontcache is an array now. A new font will be appended to the array. */
-static Fontcache *frc = NULL;
-static int frclen = 0;
-static int frccap = 0;
 static char *usedfont = NULL;
 static double usedfontsize = 0;
 static double defaultfontsize = 0;
@@ -294,6 +258,16 @@ int borderpx;
 static ShmBuffer buffers[NBUFFERS];
 static ShmBuffer *curbuf;	/* buffer being drawn this frame (xstartdraw..present) */
 static ShmBuffer *lastbuf;	/* most recently committed buffer: holds the full picture */
+/* Text underlying the last frame, before cursor/IME overlays. Only ordinary
+ * text rows participate; decorations keep their original whole-line path. */
+static struct {
+	Glyph *cells;
+	unsigned char *valid;
+	int cols, rows, mode, enabled, blocked;
+	Line *screen;
+} painted;
+static struct { int active, left, right; } paintclip;
+static void paintprepare(void);
 #if LIGATURES_PATCH
 /* A full line drawn in this frame has already restored the previous cursor. */
 static Line *restoredrows;
@@ -452,35 +426,51 @@ wlcreateshmbuffer(int width, int height, void **datap, size_t *sizep)
 	return buffer;
 }
 
+static unsigned int frameevents;
+
 static void
 bufferrelease(void *data, struct wl_buffer *buffer)
 {
 	ShmBuffer *b = data;
 	b->busy = 0;
+	frameevents++;
 }
 
 static const struct wl_buffer_listener bufferlistener = { bufferrelease };
 
 /*
- * Frame pacing: a wl_surface.frame callback is requested with every commit
- * and no new frame is drawn until the compositor has signalled that it
- * consumed the previous one.  Meanwhile terminal updates simply accumulate
- * (dirty lines / damage), so under heavy output we render at the display
- * refresh rate instead of once per maxlatency.  If a compositor never
- * answers (e.g. the surface is hidden) we fall back to drawing anyway after
- * FRAME_TIMEOUT ms so the terminal keeps behaving sanely.
+ * Keep one frame callback outstanding and accumulate terminal changes while
+ * waiting. Hidden surfaces may receive no callbacks: progressively space out
+ * fallback commits, retaining the callback so previews/restoration can wake
+ * us immediately. The bounded fallback also handles broken compositors.
  */
 #define FRAME_TIMEOUT 100.0
+#define FRAME_TIMEOUT_MAX 2000.0
 static struct wl_callback *framecb;
-static struct timespec framereq;
-static int presentpending;	/* damage could not be committed: no free buffer */
+static struct timespec framereq; /* last successful commit, including fallbacks */
+static double frameinterval = FRAME_TIMEOUT;
+static int frameurgent;
+static int presentpending;	/* drawing deferred for a callback or free buffer */
 static int forcedraw;		/* commit the next frame even if it changes nothing */
+
+/* Input should escape a long fallback wait, while still respecting normal
+ * compositor pacing. PTY output (including OSC colors) must not call this. */
+static void
+frameresume(void)
+{
+	if (frameinterval > FRAME_TIMEOUT)
+		frameurgent = 1;
+	frameinterval = FRAME_TIMEOUT;
+}
 
 static void
 frame_done(void *data, struct wl_callback *cb, uint32_t time)
 {
-	if (cb == framecb)
+	if (cb == framecb) {
 		framecb = NULL;
+		frameinterval = FRAME_TIMEOUT;
+		frameevents++;
+	}
 	wl_callback_destroy(cb);
 }
 
@@ -493,9 +483,9 @@ framewait(const struct timespec *nowp)
 	struct timespec now = *nowp;
 	double left;
 
-	if (!framecb)
+	if (!framecb || frameurgent)
 		return -1;
-	left = FRAME_TIMEOUT - TIMEDIFF(now, framereq);
+	left = frameinterval - TIMEDIFF(now, framereq);
 	return left > 0 ? left : -1;
 }
 
@@ -556,10 +546,10 @@ damageadd(DamageRegion *damage, DamageRect rect)
 static void
 destroybuffer(ShmBuffer *b)
 {
+	if (b->pix)
+		pixman_image_unref(b->pix);
 	if (b->cr)
-		cairo_destroy(b->cr);
-	if (b->surface)
-		cairo_surface_destroy(b->surface);
+		vec_destroy(b->cr);
 	if (b->buffer)
 		wl_buffer_destroy(b->buffer);
 	if (b->data)
@@ -646,11 +636,19 @@ getbuffer(int width, int height)
 		damageclear(&b->damage);
 		damageadd(&b->damage, (DamageRect){0, 0, width, height});
 		wl_buffer_add_listener(b->buffer, &bufferlistener, b);
-		b->surface = cairo_image_surface_create_for_data(b->data,
-				CAIRO_FORMAT_ARGB32, width, height, b->stride);
-		b->cr = cairo_create(b->surface);
-		cairo_set_antialias(b->cr, CAIRO_ANTIALIAS_NONE);
-		cairo_set_operator(b->cr, CAIRO_OPERATOR_OVER);
+		b->pix = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8,
+				width, height, b->data, b->stride);
+		if (!b->pix) {
+			destroybuffer(b);
+			die("could not create pixman shm image\n");
+		}
+		b->cr = vec_create(b->pix);
+		if (vec_status(b->cr) != VEC_STATUS_SUCCESS) {
+			destroybuffer(b);
+			die("could not create vector context\n");
+		}
+		vec_set_antialias(b->cr, VEC_ANTIALIAS_NONE);
+		vec_set_operator(b->cr, VEC_OPERATOR_OVER);
 		/*
 		 * Start from the default background so that nothing can show
 		 * through if some area is neither copied nor drawn.
@@ -672,6 +670,13 @@ adddamage(int x, int y, int w, int h)
 
 	if (w <= 0 || h <= 0)
 		return;
+	if (paintclip.active) {
+		int right = MIN((int64_t)x + w, paintclip.right);
+		x = MAX(x, paintclip.left);
+		w = right - x;
+		if (w <= 0)
+			return;
+	}
 	rect = (DamageRect){MAX(x, 0), MAX(y, 0),
 		MIN((int64_t)x + w, win.w), MIN((int64_t)y + h, win.h)};
 	for (i = 0; i < NBUFFERS; i++) {
@@ -686,10 +691,9 @@ adddamage(int x, int y, int w, int h)
 }
 
 /*
- * Is pixel row py going to be fully redrawn by this frame?  drawregion()
- * redraws every dirty terminal line across the whole window width,
- * including the side borders; the top/bottom borders are cleared together
- * with the first/last line.
+ * Can this pixel row skip restoration from the previous buffer? Dirty lines
+ * normally repaint the whole width (borders included); a valid saved text row
+ * may instead repaint only changed pixels, so preserve its untouched pixels.
  */
 static int
 pixelrowdirty(int py)
@@ -709,7 +713,8 @@ pixelrowdirty(int py)
 		row = term.row - 1;
 	else
 		row = (py - top) / win.ch;
-	return term.dirty[row];
+	/* Partial text repaint needs the rest of its row from the last buffer. */
+	return term.dirty[row] && !(painted.enabled && painted.valid[row]);
 }
 
 #if REFLOW_PATCH
@@ -742,14 +747,16 @@ static void
 copybufferdamage(ShmBuffer *dst, const ShmBuffer *src)
 {
 	int all = 0;
+	const unsigned char *srcdata;
+	unsigned char *dstdata;
 
 	#if REFLOW_PATCH
 	all = term.nscrolls > 0;
 	#endif // REFLOW_PATCH
 	if (dst == src || !dst->damage.count)
 		return;
-	cairo_surface_flush(src->surface);
-	cairo_surface_flush(dst->surface);
+	srcdata = (const unsigned char *)pixman_image_get_data(src->pix);
+	dstdata = (unsigned char *)pixman_image_get_data(dst->pix);
 	for (unsigned int i = 0; i < dst->damage.count; i++) {
 		DamageRect r = dst->damage.rects[i];
 		int x2 = MIN(r.x2, MIN(dst->width, src->width));
@@ -760,12 +767,10 @@ copybufferdamage(ShmBuffer *dst, const ShmBuffer *src)
 		for (int py = r.y1; py < y2; py++) {
 			if (!all && pixelrowdirty(py))
 				continue;
-			memcpy((unsigned char *)dst->data + (size_t)py * dst->stride + r.x1 * 4,
-			       (const unsigned char *)src->data + (size_t)py * src->stride + r.x1 * 4,
+			memcpy(dstdata + (size_t)py * dst->stride + r.x1 * 4,
+			       srcdata + (size_t)py * src->stride + r.x1 * 4,
 			       rowbytes);
 		}
-		cairo_surface_mark_dirty_rectangle(dst->surface, r.x1, r.y1,
-				x2 - r.x1, y2 - r.y1);
 	}
 }
 
@@ -791,6 +796,7 @@ startframe(void)
 		return 0;
 	}
 	presentpending = 0;
+	paintprepare();
 
 	if (lastbuf) {
 		copybufferdamage(b, lastbuf);
@@ -814,10 +820,9 @@ startframe(void)
 	#endif
 
 	curbuf = b;
-	xw.buf = b->surface;
 	xw.draw = b->cr;
-	cairo_reset_clip(xw.draw);
-	resetdrawstate();
+	xw.pix = b->pix;
+	vec_reset_clip(xw.draw);
 	#if BOXDRAW_PATCH
 	boxdraw_xinit(xw.draw);
 	#endif // BOXDRAW_PATCH
@@ -829,14 +834,17 @@ void
 present(void)
 {
 	ShmBuffer *b = curbuf;
+	struct timespec now;
 
 	if (!b)
 		return;
+	if (vec_status(b->cr) != VEC_STATUS_SUCCESS)
+		die("vector rendering failed\n");
+	fcftcache_endframe();
 	curbuf = NULL;
-	xw.buf = NULL;
 	xw.draw = NULL;
+	xw.pix = NULL;
 
-	cairo_surface_flush(b->surface);
 	wl_surface_attach(xw.win, b->buffer, 0, 0);
 	for (unsigned int i = 0; i < b->damage.count; i++) {
 		DamageRect r = b->damage.rects[i];
@@ -852,86 +860,37 @@ present(void)
 	} else if (compositorversion >= 3) {
 		wl_surface_set_buffer_scale(xw.win, outputscale);
 	}
-	if (framecb)
-		wl_callback_destroy(framecb);
-	framecb = wl_surface_frame(xw.win);
-	wl_callback_add_listener(framecb, &framelistener, NULL);
-	clock_gettime(CLOCK_MONOTONIC, &framereq);
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (!framecb) {
+		framecb = wl_surface_frame(xw.win);
+		wl_callback_add_listener(framecb, &framelistener, NULL);
+		frameinterval = FRAME_TIMEOUT;
+	} else if (!frameurgent && TIMEDIFF(now, framereq) >= frameinterval) {
+		frameinterval = MIN(2 * frameinterval, FRAME_TIMEOUT_MAX);
+	}
+	frameurgent = 0;
+	framereq = now;
 	b->used = framereq;
 	wl_surface_commit(xw.win);
 	wl_display_flush(xw.dpy);
 }
 
-/*
- * Drawing primitives
- *
- * The cairo context carries a lot of per-call overhead (gstate, pattern
- * allocation, clip objects, scaled font lookup).  A terminal draws
- * thousands of tiny rectangles and glyph runs per frame, so:
- *  - solid rectangles are written straight into the image surface memory;
- *  - the clip rectangle, source colour and scaled font set on the context
- *    are remembered and only changed when they actually differ.
- * Everything that uses cairo_save()/cairo_restore() around its own state
- * changes leaves the tracked state intact.  Code that changes the clip
- * without save/restore must call resetclip() first.
- */
-static struct {
-	int clipx, clipy, clipw, cliph;	/* current clip, clipw == 0: none */
-	uint32_t src;			/* current solid source, 0xAARRGGBB */
-	int srcvalid;
-	cairo_scaled_font_t *font;
-} ds;
-
-static void
-resetdrawstate(void)
-{
-	memset(&ds, 0, sizeof(ds));
-}
-
-/* set a solid source without touching the tracked state (for use
- * inside cairo_save()/cairo_restore() pairs) */
+/* Vector state is private to saved scopes; text and rectangles clip directly. */
 static inline void
 setsourceraw(const Color *c)
 {
-	cairo_set_source_rgba(xw.draw,
-			c->color.red / 65535.0,
-			c->color.green / 65535.0,
-			c->color.blue / 65535.0,
-			c->color.alpha / 65535.0);
-}
-
-static inline void
-setsource(Color *c)
-{
-	if (ds.srcvalid && ds.src == c->pixel)
-		return;
-	setsourceraw(c);
-	ds.src = c->pixel;
-	ds.srcvalid = 1;
-}
-
-static void
-setclip(int x, int y, int w, int h)
-{
-	if (ds.clipw && ds.clipx == x && ds.clipy == y &&
-	    ds.clipw == w && ds.cliph == h)
-		return;
-	cairo_reset_clip(xw.draw);
-	cairo_rectangle(xw.draw, x, y, w, h);
-	cairo_clip(xw.draw);
-	ds.clipx = x, ds.clipy = y, ds.clipw = w, ds.cliph = h;
+	vec_set_source_rgba(xw.draw,
+		c->color.red / 65535.0, c->color.green / 65535.0,
+		c->color.blue / 65535.0, c->color.alpha / 65535.0);
 }
 
 static void
 resetclip(void)
 {
-	if (!ds.clipw)
-		return;
-	cairo_reset_clip(xw.draw);
-	ds.clipw = 0;
+	vec_reset_clip(xw.draw);
 }
 
-/* premultiplied ARGB32 pixel for a colour, rounded the way cairo does it */
+/* Premultiplied ARGB32, rounded consistently with pixman. */
 static inline uint32_t
 premulpixel(const Color *c)
 {
@@ -949,7 +908,7 @@ premulpixel(const Color *c)
 
 /*
  * Fill a rectangle with a solid colour, replacing what was there (like
- * XftDrawRect).  Writes the pixels directly, bypassing cairo.
+ * XftDrawRect). Writes directly into the current pixman image.
  */
 void
 wlfillrect(const Color *c, int x, int y, int w, int h)
@@ -958,20 +917,23 @@ wlfillrect(const Color *c, int x, int y, int w, int h)
 	uint32_t *row, pix;
 	int stride, sw, sh, x2 = x + w, y2 = y + h, i;
 
-	if (!xw.buf)
+	if (!xw.pix)
 		return;
-	sw = cairo_image_surface_get_width(xw.buf);
-	sh = cairo_image_surface_get_height(xw.buf);
+	sw = pixman_image_get_width(xw.pix);
+	sh = pixman_image_get_height(xw.pix);
 	x = MAX(x, 0);
 	y = MAX(y, 0);
 	x2 = MIN(x2, sw);
 	y2 = MIN(y2, sh);
+	if (paintclip.active) {
+		x = MAX(x, paintclip.left);
+		x2 = MIN(x2, paintclip.right);
+	}
 	if (x2 <= x || y2 <= y)
 		return;
 
-	cairo_surface_flush(xw.buf);
-	data = cairo_image_surface_get_data(xw.buf);
-	stride = cairo_image_surface_get_stride(xw.buf);
+	data = (unsigned char *)pixman_image_get_data(xw.pix);
+	stride = pixman_image_get_stride(xw.pix);
 	pix = premulpixel(c);
 	w = x2 - x;
 	h = y2 - y;
@@ -981,7 +943,6 @@ wlfillrect(const Color *c, int x, int y, int w, int h)
 		for (j = 0; j < w; j++)
 			row[j] = pix;
 	}
-	cairo_surface_mark_dirty_rectangle(xw.buf, x, y, w, h);
 }
 
 void
@@ -993,76 +954,20 @@ drawrect(Color *c, int x, int y, int w, int h)
 	adddamage(x, y, w, h);
 }
 
-static cairo_glyph_t *glyphbuf;
-static int glyphbufcap;
 
 /* draw glyph runs, clipped to the given rectangle */
 void
 drawglyphs(Color *fg, const GlyphFontSpec *specs, int len,
            int cx, int cy, int cw, int ch)
 {
-	int i, n;
-
-	if (len <= 0)
-		return;
-	if (glyphbufcap < len) {
-		glyphbufcap = len + 64;
-		glyphbuf = xrealloc(glyphbuf, glyphbufcap * sizeof(cairo_glyph_t));
+	if (paintclip.active) {
+		int right = MIN(cx + cw, paintclip.right);
+		cx = MAX(cx, paintclip.left);
+		cw = right - cx;
 	}
-
-	setclip(cx, cy, cw, ch);
-	setsource(fg);
-	for (i = 0; i < len; i += n) {
-		cairo_scaled_font_t *font = specs[i].font;
-		for (n = 0; i + n < len && specs[i + n].font == font; n++) {
-			glyphbuf[n].index = specs[i + n].glyph;
-			glyphbuf[n].x = specs[i + n].x;
-			glyphbuf[n].y = specs[i + n].y;
-		}
-		if (ds.font != font) {
-			cairo_set_scaled_font(xw.draw, font);
-			ds.font = font;
-		}
-		cairo_show_glyphs(xw.draw, glyphbuf, n);
-	}
+	fcftdraw(fg, specs, len, cx, cy, cw, ch);
 }
 
-/*
- * Glyph index lookup with a small direct mapped cache (XftCharIndex
- * equivalent).
- */
-#define GLYPHCACHE 4096
-static struct {
-	cairo_scaled_font_t *font;
-	Rune u;
-	unsigned int idx;
-} glyphcache[GLYPHCACHE];
-
-unsigned int
-glyphindex(cairo_scaled_font_t *sf, Rune u)
-{
-	unsigned int h = ((uintptr_t)sf >> 4 ^ u * 2654435761u) % GLYPHCACHE;
-	FT_Face face;
-	unsigned int idx;
-
-	if (glyphcache[h].font == sf && glyphcache[h].u == u && sf != NULL)
-		return glyphcache[h].idx;
-
-	face = cairo_ft_scaled_font_lock_face(sf);
-	idx = face ? FT_Get_Char_Index(face, u) : 0;
-	cairo_ft_scaled_font_unlock_face(sf);
-
-	glyphcache[h].font = sf;
-	glyphcache[h].u = u;
-	glyphcache[h].idx = idx;
-	return idx;
-}
-
-static void
-clearglyphcache(void)
-{
-	memset(glyphcache, 0, sizeof(glyphcache));
-}
 
 /*
  * Selections / clipboard
@@ -1598,7 +1503,7 @@ zoomabs(const Arg *arg)
 	for (im = term.images, i = 0; i < 2; i++, im = term.images_alt) {
 		for (; im; im = im->next) {
 			if (im->pixmap)
-				cairo_surface_destroy((cairo_surface_t *)im->pixmap);
+				pixman_image_unref(im->pixmap);
 			im->pixmap = NULL;
 			im->clipmask = NULL;
 		}
@@ -1917,10 +1822,36 @@ bmotion(MouseEvent *e)
 	mousesel(e, 0);
 }
 
+/* Return allocator holes after a resize burst, instead of walking the heap
+ * for every configure. Keep a bound during a long continuous drag as well. */
+#define RESIZE_TRIM_IDLE 500.0
+#define RESIZE_TRIM_MAX 2000.0
+static struct {
+	struct timespec first, last;
+	int pending;
+} resizetrim;
+
+static double
+trimresize(const struct timespec *now)
+{
+	double left;
+
+	if (!resizetrim.pending || curbuf)
+		return -1;
+	left = MIN(RESIZE_TRIM_IDLE - TIMEDIFF((*now), resizetrim.last),
+	           RESIZE_TRIM_MAX - TIMEDIFF((*now), resizetrim.first));
+	if (left > 0)
+		return left;
+	resizetrim.pending = 0;
+	/* Reflow's temporary rows and replaced grids are no longer referenced. */
+	malloc_trim(0);
+	return -1;
+}
+
 void
 cresize(int width, int height)
 {
-	int col, row;
+	int col, row, changed;
 
 	if (width != 0)
 		win.w = width;
@@ -1937,21 +1868,24 @@ cresize(int width, int height)
 	win.vborderpx = (win.h - row * win.ch) / 2;
 	#endif // ANYSIZE_PATCH
 
+	changed = col != term.col || row != term.row;
 	tresize(col, row);
 	xresize(col, row);
 	if (ttystarted)
 		ttyresize(win.tw, win.th);
-	/*
-	 * tresize() (reflow) frees thousands of scrollback lines and a large
-	 * temporary buffer; hand the resulting holes back to the kernel so RSS
-	 * does not ratchet upwards with every resize.
-	 */
-	malloc_trim(0);
+	if (changed) {
+		clock_gettime(CLOCK_MONOTONIC, &resizetrim.last);
+		if (!resizetrim.pending)
+			resizetrim.first = resizetrim.last;
+		resizetrim.pending = 1;
+	}
 }
 
 void
 xresize(int col, int row)
 {
+	if (painted.valid)
+		memset(painted.valid, 0, (size_t)painted.rows);
 	win.tw = col * win.cw;
 	win.th = row * win.ch;
 	#if CURSOR_TRAIL_PATCH
@@ -2360,54 +2294,6 @@ xdefaultsubstitute(FcPattern *pattern)
 		FcPatternAddInteger(pattern, FC_RGBA, FC_RGBA_UNKNOWN);
 }
 
-/* create a cairo scaled font for a fontconfig match at the given pixel size */
-static cairo_scaled_font_t *
-opencairofont(FcPattern *match, double pixelsize)
-{
-	cairo_font_face_t *face;
-	cairo_matrix_t fm, ctm;
-	cairo_font_options_t *fo;
-	cairo_scaled_font_t *sf;
-	FcBool aa = FcTrue;
-	int rgba = FC_RGBA_UNKNOWN, hs = FC_HINT_SLIGHT;
-
-	face = cairo_ft_font_face_create_for_pattern(match);
-	if (cairo_font_face_status(face) != CAIRO_STATUS_SUCCESS) {
-		cairo_font_face_destroy(face);
-		return NULL;
-	}
-
-	cairo_matrix_init_scale(&fm, pixelsize, pixelsize);
-	cairo_matrix_init_identity(&ctm);
-
-	fo = cairo_font_options_create();
-	cairo_font_options_set_hint_metrics(fo, CAIRO_HINT_METRICS_ON);
-	FcPatternGetBool(match, FC_ANTIALIAS, 0, &aa);
-	FcPatternGetInteger(match, FC_RGBA, 0, &rgba);
-	FcPatternGetInteger(match, FC_HINT_STYLE, 0, &hs);
-	if (!aa)
-		cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_NONE);
-	else if (rgba == FC_RGBA_RGB || rgba == FC_RGBA_BGR ||
-	         rgba == FC_RGBA_VRGB || rgba == FC_RGBA_VBGR)
-		cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_SUBPIXEL);
-	else
-		cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_GRAY);
-	switch (hs) {
-	case FC_HINT_NONE:   cairo_font_options_set_hint_style(fo, CAIRO_HINT_STYLE_NONE); break;
-	case FC_HINT_SLIGHT: cairo_font_options_set_hint_style(fo, CAIRO_HINT_STYLE_SLIGHT); break;
-	case FC_HINT_MEDIUM: cairo_font_options_set_hint_style(fo, CAIRO_HINT_STYLE_MEDIUM); break;
-	case FC_HINT_FULL:   cairo_font_options_set_hint_style(fo, CAIRO_HINT_STYLE_FULL); break;
-	}
-
-	sf = cairo_scaled_font_create(face, &fm, &ctm, fo);
-	cairo_font_options_destroy(fo);
-	cairo_font_face_destroy(face);
-	if (cairo_scaled_font_status(sf) != CAIRO_STATUS_SUCCESS) {
-		cairo_scaled_font_destroy(sf);
-		return NULL;
-	}
-	return sf;
-}
 
 /* pixel size a pattern asks for, scaled for the output */
 static double
@@ -2420,91 +2306,12 @@ patternpixelsize(FcPattern *pattern)
 	return size;
 }
 
+#include "patch/fcft.c"
+
 int
 xloadfont(Font *f, FcPattern *pattern)
 {
-	FcPattern *configured;
-	FcPattern *match;
-	FcResult result;
-	cairo_font_extents_t fext;
-	cairo_text_extents_t text;
-	double pixelsize;
-	int wantattr, haveattr;
-
-	/*
-	 * Manually configure instead of calling XftMatchFont
-	 * so that we can use the configured pattern for
-	 * "missing glyph" lookups.
-	 */
-	configured = FcPatternDuplicate(pattern);
-	if (!configured)
-		return 1;
-
-	/* apply the output scale to the requested pixel size */
-	pixelsize = patternpixelsize(configured) * xw.scale;
-	FcPatternDel(configured, FC_PIXEL_SIZE);
-	FcPatternDel(configured, FC_SIZE);
-	FcPatternAddDouble(configured, FC_PIXEL_SIZE, pixelsize);
-
-	FcConfigSubstitute(NULL, configured, FcMatchPattern);
-	xdefaultsubstitute(configured);
-	FcDefaultSubstitute(configured);
-
-	match = FcFontMatch(NULL, configured, &result);
-	if (!match) {
-		FcPatternDestroy(configured);
-		return 1;
-	}
-
-	FcPatternGetDouble(match, FC_PIXEL_SIZE, 0, &pixelsize);
-	if (!(f->match = opencairofont(match, pixelsize))) {
-		FcPatternDestroy(configured);
-		FcPatternDestroy(match);
-		return 1;
-	}
-
-	if ((FcPatternGetInteger(pattern, "slant", 0, &wantattr) ==
-	    FcResultMatch)) {
-		/*
-		 * Check if fontconfig was unable to find a font with the
-		 * appropriate slant but gave us one anyway. Try to mitigate.
-		 */
-		if ((FcPatternGetInteger(match, "slant", 0,
-		    &haveattr) != FcResultMatch) || haveattr < wantattr) {
-			f->badslant = 1;
-			fputs("font slant does not match\n", stderr);
-		}
-	}
-
-	if ((FcPatternGetInteger(pattern, "weight", 0, &wantattr) ==
-	    FcResultMatch)) {
-		if ((FcPatternGetInteger(match, "weight", 0,
-		    &haveattr) != FcResultMatch) || haveattr != wantattr) {
-			f->badweight = 1;
-			fputs("font weight does not match\n", stderr);
-		}
-	}
-	FcPatternDestroy(match);
-
-	cairo_scaled_font_extents(f->match, &fext);
-	cairo_scaled_font_text_extents(f->match, ascii_printable, &text);
-
-	f->set = NULL;
-	f->pattern = configured;
-
-	f->ascent = lround(fext.ascent);
-	f->descent = lround(fext.descent);
-	f->lbearing = 0;
-	f->rbearing = lround(fext.max_x_advance);
-
-	f->height = f->ascent + f->descent;
-	#if WIDE_GLYPH_SPACING_PATCH
-	f->width = ceil((text.x_advance > 18 * strlen(ascii_printable) ? text.x_advance / 3 : text.x_advance) / strlen(ascii_printable));
-	#else
-	f->width = ceil(text.x_advance / strlen(ascii_printable));
-	#endif // WIDE_GLYPH_SPACING_PATCH
-
-	return 0;
+	return fcftloadfont(f, pattern);
 }
 
 void
@@ -2563,61 +2370,54 @@ xloadfonts(const char *fontstr, double fontsize)
 	#if !DISABLE_ITALIC_FONTS_PATCH
 	FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ITALIC);
 	#endif // DISABLE_ITALIC_FONTS_PATCH
-	if (xloadfont(&dc.ifont, pattern))
-		die("can't open font %s\n", fontstr);
+	fcftdeferfont(&dc.ifont, pattern);
 
 	FcPatternDel(pattern, FC_WEIGHT);
 	#if !DISABLE_BOLD_FONTS_PATCH
 	FcPatternAddInteger(pattern, FC_WEIGHT, FC_WEIGHT_BOLD);
 	#endif // DISABLE_BOLD_FONTS_PATCH
-	if (xloadfont(&dc.ibfont, pattern))
-		die("can't open font %s\n", fontstr);
+	fcftdeferfont(&dc.ibfont, pattern);
 
 	FcPatternDel(pattern, FC_SLANT);
 	#if !DISABLE_ROMAN_FONTS_PATCH
 	FcPatternAddInteger(pattern, FC_SLANT, FC_SLANT_ROMAN);
 	#endif // DISABLE_ROMAN_FONTS_PATCH
-	if (xloadfont(&dc.bfont, pattern))
-		die("can't open font %s\n", fontstr);
+	fcftdeferfont(&dc.bfont, pattern);
 
 	FcPatternDestroy(pattern);
 
-	#if FONT2_PATCH
-	/* Seed fallback priority on startup and every zoom/output-scale reload. */
-	xloadsparefonts();
-	#endif // FONT2_PATCH
 }
 
 void
 xunloadfont(Font *f)
 {
-	cairo_scaled_font_destroy(f->match);
+	fcft_destroy(f->match);
+	for (size_t i = 0; i < f->nfonts; i++)
+		FcStrFree((FcChar8 *)f->names[i]);
+	free(f->names);
+	f->names = NULL;
+	f->nfonts = 0;
 	FcPatternDestroy(f->pattern);
-	if (f->set)
-		FcFontSetDestroy(f->set);
 	f->match = NULL;
 	f->pattern = NULL;
-	f->set = NULL;
 }
 
 void
 xunloadfonts(void)
 {
+	if (painted.valid)
+		memset(painted.valid, 0, (size_t)painted.rows);
 	#if LIGATURES_PATCH
-	/* Clear Harfbuzz font cache. */
-	hbunloadfonts();
-	#endif // LIGATURES_PATCH
-
-	/* Free the loaded fonts in the font cache.  */
-	while (frclen > 0)
-		cairo_scaled_font_destroy(frc[--frclen].font);
-
+	textrun_clear();
+	free(fcftrunes); free(fcftcolumns);
+	fcftrunes = NULL; fcftcolumns = NULL; fcftspecsize = 0;
+	#endif
+	fcftcache_clear();
+	fcftsolid_clear();
 	xunloadfont(&dc.font);
 	xunloadfont(&dc.bfont);
 	xunloadfont(&dc.ifont);
 	xunloadfont(&dc.ibfont);
-	clearglyphcache();
-	memset(fallbackresults, 0, sizeof fallbackresults);
 }
 
 /*
@@ -2663,6 +2463,8 @@ xdgsurface_configure(void *data, struct xdg_surface *surface, uint32_t serial)
 	}
 	updatesize();
 	forcedraw = 1; /* a configure is always answered with a commit */
+	frameresume();
+	frameurgent = 1;
 	wlevents++;
 }
 
@@ -2745,7 +2547,7 @@ setscale(double scale)
 		for (int i = 0; i < 2; i++) {
 			for (ImageList *im = i ? term.images_alt : term.images; im; im = im->next) {
 				if (im->pixmap)
-					cairo_surface_destroy((cairo_surface_t *)im->pixmap);
+					pixman_image_unref(im->pixmap);
 				im->pixmap = NULL;
 			}
 		}
@@ -2754,6 +2556,8 @@ setscale(double scale)
 	}
 	if (xw.configured)
 		updatesize();
+	frameresume();
+	frameurgent = 1;
 	wlevents++;
 }
 
@@ -2854,6 +2658,7 @@ keyboard_keymap(void *data, struct wl_keyboard *kbd, uint32_t format, int32_t fd
 static void
 focusin(void)
 {
+	frameresume();
 	win.mode |= MODE_FOCUSED;
 	if (IS_SET(MODE_FOCUS))
 		ttywrite("\033[I", 3, 0);
@@ -2911,6 +2716,7 @@ keyboard_key(void *data, struct wl_keyboard *kbd, uint32_t serial, uint32_t time
 {
 	xkb_keycode_t keycode = key + 8;
 
+	frameresume();
 	xw.serial = serial;
 	wlevents++;
 
@@ -3011,6 +2817,7 @@ pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t
 {
 	MouseEvent e;
 
+	frameresume();
 	xw.ptrx = wl_fixed_to_double(sx) * xw.scale;
 	xw.ptry = wl_fixed_to_double(sy) * xw.scale;
 
@@ -3044,6 +2851,7 @@ buttonevent(int type, int button, uint32_t time)
 {
 	MouseEvent e;
 
+	frameresume();
 	e.type = type;
 	e.button = button;
 	e.state = modstate() | buttons << 8;
@@ -3315,6 +3123,7 @@ textinput_delete(void *data, struct zwp_text_input_v3 *ti, uint32_t before, uint
 static void
 textinput_done(void *data, struct zwp_text_input_v3 *ti, uint32_t serial)
 {
+	frameresume();
 	/* apply pending state atomically (order mandated by the protocol) */
 	if (ime.pcommit) {
 		size_t len = strlen(ime.pcommit);
@@ -3649,280 +3458,11 @@ xinit(int cols, int rows)
 	xsel.clipboard_snapshot = NULL;
 }
 
-#if LIGATURES_PATCH
-void
-xresetfontsettings(uint32_t mode, Font **font, int *frcflags)
-{
-	*font = &dc.font;
-	if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD)) {
-		*font = &dc.ibfont;
-		*frcflags = FRC_ITALICBOLD;
-	} else if (mode & ATTR_ITALIC) {
-		*font = &dc.ifont;
-		*frcflags = FRC_ITALIC;
-	} else if (mode & ATTR_BOLD) {
-		*font = &dc.bfont;
-		*frcflags = FRC_BOLD;
-	}
-}
-#endif // LIGATURES_PATCH
-
-/* find (or load) a fallback font for rune in the font ring cache */
-static int
-fallbackfont(Font *font, int frcflags, Rune rune, unsigned int *glyphidx)
-{
-	FcResult fcres;
-	FcPattern *fcpattern, *fontpattern;
-	FcFontSet *fcsets[] = { NULL };
-	FcCharSet *fccharset;
-	double pixelsize;
-	int f;
-	unsigned int slot = (rune * 2654435761u ^ (unsigned int)frcflags) &
-	                    (FALLBACK_RESULTS - 1);
-	FallbackResult *result = &fallbackresults[slot];
-
-	if (result->source == font && result->rune == rune &&
-	    result->index < frclen && frc[result->index].flags == frcflags &&
-	    (result->glyph || result->generation == frclen)) {
-		*glyphidx = result->glyph;
-		return result->index;
-	}
-	for (f = 0; f < frclen; f++) {
-		if (frc[f].flags != frcflags)
-			continue;
-		*glyphidx = glyphindex(frc[f].font, rune);
-		if (*glyphidx)
-			break;
-	}
-
-	/* Nothing was found. Use fontconfig to find matching font. */
-	if (f >= frclen) {
-		if (!font->set)
-			font->set = FcFontSort(0, font->pattern, 1, 0, &fcres);
-		fcsets[0] = font->set;
-
-		/*
-		 * Nothing was found in the cache. Now use
-		 * some dozen of Fontconfig calls to get the
-		 * font for one single character.
-		 *
-		 * Xft and fontconfig are design failures.
-		 */
-		fcpattern = FcPatternDuplicate(font->pattern);
-		fccharset = FcCharSetCreate();
-
-		FcCharSetAddChar(fccharset, rune);
-		FcPatternAddCharSet(fcpattern, FC_CHARSET, fccharset);
-		FcPatternAddBool(fcpattern, FC_SCALABLE, 1);
-
-		FcConfigSubstitute(0, fcpattern, FcMatchPattern);
-		FcDefaultSubstitute(fcpattern);
-
-		fontpattern = FcFontSetMatch(0, fcsets, 1, fcpattern, &fcres);
-		if (!fontpattern)
-			die("FcFontSetMatch failed seeking fallback font\n");
-
-		/* Allocate memory for the new cache entry. */
-		if (frclen >= frccap) {
-			frccap += 16;
-			frc = xrealloc(frc, frccap * sizeof(Fontcache));
-		}
-
-		if (FcPatternGetDouble(fontpattern, FC_PIXEL_SIZE, 0, &pixelsize) != FcResultMatch)
-			pixelsize = patternpixelsize(font->pattern);
-		cairo_scaled_font_t *matched = opencairofont(fontpattern, pixelsize);
-		if (!matched)
-			die("opencairofont failed seeking fallback font: %s\n",
-				strerror(errno));
-		/* Cairo interns identical scaled fonts. A new missing rune must not
-		 * append another reference to the same font and lengthen every scan. */
-		for (f = 0; f < frclen; f++)
-			if (frc[f].font == matched && frc[f].flags == frcflags)
-				break;
-		if (f == frclen) {
-			frc[frclen++] = (Fontcache){.font = matched, .flags = frcflags};
-		} else {
-			cairo_scaled_font_destroy(matched);
-		}
-		*glyphidx = glyphindex(frc[f].font, rune);
-
-		FcPatternDestroy(fcpattern);
-		FcPatternDestroy(fontpattern);
-		FcCharSetDestroy(fccharset);
-	}
-
-	*result = (FallbackResult){.source = font, .rune = rune, .glyph = *glyphidx,
-	                           .index = f, .generation = frclen};
-	return f;
-}
 
 int
 xmakeglyphfontspecs(GlyphFontSpec *specs, const Glyph *glyphs, int len, int x, int y)
 {
-	#if ANYSIZE_PATCH
-	float winx = win.hborderpx + x * win.cw, winy = win.vborderpx + y * win.ch, xp, yp;
-	#else
-	float winx = borderpx + x * win.cw, winy = borderpx + y * win.ch, xp, yp;
-	#endif // ANYSIZE_PATCH
-	ushort mode, prevmode = USHRT_MAX;
-	Font *font = &dc.font;
-	int frcflags = FRC_NORMAL;
-	float runewidth = win.cw * ((glyphs[0].mode & ATTR_WIDE) ? 2.0f : 1.0f);
-	Rune rune;
-	unsigned int glyphidx;
-	int i, f, numspecs = 0;
-	#if LIGATURES_PATCH
-	float cluster_xp, cluster_yp;
-	HbTransformData shaped;
-
-	/* Initial values. */
-	xresetfontsettings(glyphs[0].mode, &font, &frcflags);
-	#if VERTCENTER_PATCH
-	xp = winx, yp = winy + font->ascent + win.cyo;
-	#else
-	xp = winx, yp = winy + font->ascent;
-	#endif // VERTCENTER_PATCH
-	cluster_xp = xp; cluster_yp = yp;
-	#if BOXDRAW_PATCH
-	/* Attribute runs are homogeneous. Geometry is one shape per cell,
-	 * independent of font coverage, GSUB ligatures, and shaping caches. */
-	if (glyphs[0].mode & ATTR_BOXDRAW) {
-		for (i = 0; i < len; i++) {
-			if (glyphs[i].mode & ATTR_WDUMMY)
-				continue;
-			specs[numspecs].font = font->match;
-			specs[numspecs].glyph = boxdrawindex(&glyphs[i]);
-			specs[numspecs].x = xp;
-			specs[numspecs].y = yp;
-			numspecs++;
-			xp += win.cw * ((glyphs[i].mode & ATTR_WIDE) ? 2 : 1);
-		}
-		return numspecs;
-	}
-	#endif
-	/* Shape the segment. */
-	hbtransform(&shaped, font->match, glyphs, 0, len);
-	#endif // LIGATURES_PATCH
-
-	#if LIGATURES_PATCH
-	for (int code_idx = 0; code_idx < shaped.count; code_idx++)
-	#elif VERTCENTER_PATCH
-	for (i = 0, xp = winx, yp = winy + font->ascent + win.cyo; i < len; ++i)
-	#else
-	for (i = 0, xp = winx, yp = winy + font->ascent; i < len; ++i)
-	#endif // LIGATURES_PATCH | VERTCENTER_PATCH
-	{
-		#if LIGATURES_PATCH
-		int idx = shaped.glyphs[code_idx].cluster;
-
-		/* Skip dummy wide-character spacing. */
-		if (glyphs[idx].mode & ATTR_WDUMMY)
-			continue;
-
-		/* Advance the drawing cursor if we've moved to a new cluster */
-		if (code_idx > 0 && idx != shaped.glyphs[code_idx - 1].cluster) {
-			xp += runewidth;
-			cluster_xp = xp;
-			cluster_yp = yp;
-		}
-
-		#if BOXDRAW_PATCH
-		if (glyphs[idx].mode & ATTR_BOXDRAW) {
-			/* minor shoehorning: boxdraw uses only this ushort */
-			specs[numspecs].font = font->match;
-			specs[numspecs].glyph = boxdrawindex(&glyphs[idx]);
-			specs[numspecs].x = xp;
-			specs[numspecs].y = yp;
-			numspecs++;
-		} else if (shaped.glyphs[code_idx].codepoint != 0) {
-		#else
-		if (shaped.glyphs[code_idx].codepoint != 0) {
-		#endif // BOXDRAW_PATCH
-			/* If symbol is found, put it into the specs. */
-			specs[numspecs].font = font->match;
-			specs[numspecs].glyph = shaped.glyphs[code_idx].codepoint;
-			specs[numspecs].x = cluster_xp + (short)(shaped.positions[code_idx].x_offset / 64.);
-			specs[numspecs].y = cluster_yp - (short)(shaped.positions[code_idx].y_offset / 64.);
-			cluster_xp += shaped.positions[code_idx].x_advance / 64.;
-			cluster_yp += shaped.positions[code_idx].y_advance / 64.;
-			numspecs++;
-		} else {
-			/* If it's not found, try to fetch it through the font cache. */
-			rune = glyphs[idx].u;
-			f = fallbackfont(font, frcflags, rune, &glyphidx);
-			specs[numspecs].font = frc[f].font;
-			specs[numspecs].glyph = glyphidx;
-			specs[numspecs].x = (short)xp;
-			specs[numspecs].y = (short)yp;
-			numspecs++;
-		}
-		#else // !LIGATURES_PATCH
-		/* Fetch rune and mode for current glyph. */
-		rune = glyphs[i].u;
-		mode = glyphs[i].mode;
-
-		/* Skip dummy wide-character spacing. */
-		if (mode == ATTR_WDUMMY)
-			continue;
-
-		/* Determine font for glyph if different from previous glyph. */
-		if (prevmode != mode) {
-			prevmode = mode;
-			font = &dc.font;
-			frcflags = FRC_NORMAL;
-			runewidth = win.cw * ((mode & ATTR_WIDE) ? 2.0f : 1.0f);
-			if ((mode & ATTR_ITALIC) && (mode & ATTR_BOLD)) {
-				font = &dc.ibfont;
-				frcflags = FRC_ITALICBOLD;
-			} else if (mode & ATTR_ITALIC) {
-				font = &dc.ifont;
-				frcflags = FRC_ITALIC;
-			} else if (mode & ATTR_BOLD) {
-				font = &dc.bfont;
-				frcflags = FRC_BOLD;
-			}
-			#if VERTCENTER_PATCH
-			yp = winy + font->ascent + win.cyo;
-			#else
-			yp = winy + font->ascent;
-			#endif // VERTCENTER_PATCH
-		}
-
-		#if BOXDRAW_PATCH
-		if (mode & ATTR_BOXDRAW) {
-			/* minor shoehorning: boxdraw uses only this ushort */
-			glyphidx = boxdrawindex(&glyphs[i]);
-		} else {
-			/* Lookup character index with default font. */
-			glyphidx = glyphindex(font->match, rune);
-		}
-		#else
-		/* Lookup character index with default font. */
-		glyphidx = glyphindex(font->match, rune);
-		#endif // BOXDRAW_PATCH
-		if (glyphidx) {
-			specs[numspecs].font = font->match;
-			specs[numspecs].glyph = glyphidx;
-			specs[numspecs].x = (short)xp;
-			specs[numspecs].y = (short)yp;
-			xp += runewidth;
-			numspecs++;
-			continue;
-		}
-
-		/* Fallback on font cache, search the font cache for match. */
-		f = fallbackfont(font, frcflags, rune, &glyphidx);
-
-		specs[numspecs].font = frc[f].font;
-		specs[numspecs].glyph = glyphidx;
-		specs[numspecs].x = (short)xp;
-		specs[numspecs].y = (short)yp;
-		xp += runewidth;
-		numspecs++;
-		#endif // LIGATURES_PATCH
-	}
-
-	return numspecs;
+	return fcftspecs(specs, glyphs, len, x, y);
 }
 
 #if UNDERCURL_PATCH
@@ -3973,7 +3513,7 @@ static int getSlope (int x, int iPoint, int waveWidth)
 
 typedef struct { float x, y; } UPoint;
 
-/* stroke a polyline with cairo; when relative is set every point but the
+/* Stroke a polyline; when relative is set every point but the
  * first is an offset from the previous one (XDrawLines CoordModePrevious) */
 static void
 drawlines(Color *c, int lw, UPoint *points, int npoints, int relative)
@@ -3983,16 +3523,16 @@ drawlines(Color *c, int lw, UPoint *points, int npoints, int relative)
 
 	if (npoints < 2)
 		return;
-	cairo_save(xw.draw);
-	cairo_set_operator(xw.draw, CAIRO_OPERATOR_OVER);
+	vec_save(xw.draw);
+	vec_set_operator(xw.draw, VEC_OPERATOR_OVER);
 	setsourceraw(c);
-	cairo_set_line_width(xw.draw, lw);
-	cairo_set_line_cap(xw.draw, CAIRO_LINE_CAP_BUTT);
-	cairo_set_line_join(xw.draw, CAIRO_LINE_JOIN_MITER);
-	cairo_set_antialias(xw.draw, CAIRO_ANTIALIAS_DEFAULT);
+	vec_set_line_width(xw.draw, lw);
+	vec_set_line_cap(xw.draw, VEC_LINE_CAP_BUTT);
+	vec_set_line_join(xw.draw, VEC_LINE_JOIN_MITER);
+	vec_set_antialias(xw.draw, VEC_ANTIALIAS_DEFAULT);
 	px = points[0].x + 0.5f;
 	py = points[0].y + 0.5f;
-	cairo_move_to(xw.draw, px, py);
+	vec_move_to(xw.draw, px, py);
 	for (i = 1; i < npoints; i++) {
 		if (relative) {
 			px += points[i].x;
@@ -4001,10 +3541,10 @@ drawlines(Color *c, int lw, UPoint *points, int npoints, int relative)
 			px = points[i].x + 0.5f;
 			py = points[i].y + 0.5f;
 		}
-		cairo_line_to(xw.draw, px, py);
+		vec_line_to(xw.draw, px, py);
 	}
-	cairo_stroke(xw.draw);
-	cairo_restore(xw.draw);
+	vec_stroke(xw.draw);
+	vec_restore(xw.draw);
 }
 #endif // UNDERCURL_PATCH
 
@@ -4198,6 +3738,13 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 	}
 	#endif // WIDE_GLYPHS_PATCH
 
+	/* Color glyphs carry their own RGB values, so changing fg to bg cannot
+	 * hide them. Leave the freshly painted background intact, including its
+	 * alpha, and suppress decorations along with the hidden text. */
+	if ((base.mode & ATTR_INVISIBLE) ||
+	    ((base.mode & ATTR_BLINK) && (win.mode & MODE_BLINK)))
+		return;
+
 	#if WIDE_GLYPHS_PATCH
 	if (dmode & DRAW_FG) {
 	#endif // WIDE_GLYPHS_PATCH
@@ -4274,50 +3821,50 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 			// Draw waves
 			int i = 0;
 			resetclip();
-			cairo_save(xw.draw);
-			cairo_set_operator(xw.draw, CAIRO_OPERATOR_OVER);
+			vec_save(xw.draw);
+			vec_set_operator(xw.draw, VEC_OPERATOR_OVER);
 			setsourceraw(&linecolor);
-			cairo_set_line_width(xw.draw, wlw);
-			cairo_set_antialias(xw.draw, CAIRO_ANTIALIAS_DEFAULT);
-			cairo_new_path(xw.draw);
+			vec_set_line_width(xw.draw, wlw);
+			vec_set_antialias(xw.draw, VEC_ANTIALIAS_DEFAULT);
+			vec_new_path(xw.draw);
 			for (i = 0; i < charlen-1; i++) {
 				/* arc(x, y, w, h, a1, a2): X arcs measured counter clockwise from 3 o'clock */
-				cairo_save(xw.draw);
-				cairo_translate(xw.draw, wx + win.cw * i + ww / 4 + win.cw / 4.0, wy + wh / 2.0);
-				cairo_scale(xw.draw, win.cw / 4.0, MAX(wh, 1) / 2.0);
-				cairo_new_sub_path(xw.draw);
-				cairo_arc_negative(xw.draw, 0, 0, 1, 0, -M_PI);
-				cairo_restore(xw.draw);
-				cairo_save(xw.draw);
-				cairo_translate(xw.draw, wx + win.cw * i + ww * 0.75 + win.cw / 4.0, wy + wh / 2.0);
-				cairo_scale(xw.draw, win.cw / 4.0, MAX(wh, 1) / 2.0);
-				cairo_new_sub_path(xw.draw);
-				cairo_arc_negative(xw.draw, 0, 0, 1, -M_PI, -2 * M_PI);
-				cairo_restore(xw.draw);
+				vec_save(xw.draw);
+				vec_translate(xw.draw, wx + win.cw * i + ww / 4 + win.cw / 4.0, wy + wh / 2.0);
+				vec_scale(xw.draw, win.cw / 4.0, MAX(wh, 1) / 2.0);
+				vec_new_sub_path(xw.draw);
+				vec_arc_negative(xw.draw, 0, 0, 1, 0, -M_PI);
+				vec_restore(xw.draw);
+				vec_save(xw.draw);
+				vec_translate(xw.draw, wx + win.cw * i + ww * 0.75 + win.cw / 4.0, wy + wh / 2.0);
+				vec_scale(xw.draw, win.cw / 4.0, MAX(wh, 1) / 2.0);
+				vec_new_sub_path(xw.draw);
+				vec_arc_negative(xw.draw, 0, 0, 1, -M_PI, -2 * M_PI);
+				vec_restore(xw.draw);
 			}
 			// Last wave
-			cairo_save(xw.draw);
-			cairo_translate(xw.draw, wx + ww * i + ww / 4 + ww / 4.0, wy + wh / 2.0);
-			cairo_scale(xw.draw, ww / 4.0, MAX(wh, 1) / 2.0);
-			cairo_new_sub_path(xw.draw);
-			cairo_arc_negative(xw.draw, 0, 0, 1, 0, -M_PI);
-			cairo_restore(xw.draw);
+			vec_save(xw.draw);
+			vec_translate(xw.draw, wx + ww * i + ww / 4 + ww / 4.0, wy + wh / 2.0);
+			vec_scale(xw.draw, ww / 4.0, MAX(wh, 1) / 2.0);
+			vec_new_sub_path(xw.draw);
+			vec_arc_negative(xw.draw, 0, 0, 1, 0, -M_PI);
+			vec_restore(xw.draw);
 			// Last wave tail
-			cairo_save(xw.draw);
-			cairo_translate(xw.draw, wx + ww * i + ww * 0.75 + ceil(ww / 2.) / 2.0, wy + wh / 2.0);
-			cairo_scale(xw.draw, ceil(ww / 2.) / 2.0, MAX(wh, 1) / 2.0);
-			cairo_new_sub_path(xw.draw);
-			cairo_arc_negative(xw.draw, 0, 0, 1, -M_PI, -1.5 * M_PI);
-			cairo_restore(xw.draw);
+			vec_save(xw.draw);
+			vec_translate(xw.draw, wx + ww * i + ww * 0.75 + ceil(ww / 2.) / 2.0, wy + wh / 2.0);
+			vec_scale(xw.draw, ceil(ww / 2.) / 2.0, MAX(wh, 1) / 2.0);
+			vec_new_sub_path(xw.draw);
+			vec_arc_negative(xw.draw, 0, 0, 1, -M_PI, -1.5 * M_PI);
+			vec_restore(xw.draw);
 			// First wave tail
-			cairo_save(xw.draw);
-			cairo_translate(xw.draw, wx - ww/4 - 1 + ceil(ww / 2.) / 2.0, wy + wh / 2.0);
-			cairo_scale(xw.draw, ceil(ww / 2.) / 2.0, MAX(wh, 1) / 2.0);
-			cairo_new_sub_path(xw.draw);
-			cairo_arc_negative(xw.draw, 0, 0, 1, -1.5 * M_PI, -2 * M_PI);
-			cairo_restore(xw.draw);
-			cairo_stroke(xw.draw);
-			cairo_restore(xw.draw);
+			vec_save(xw.draw);
+			vec_translate(xw.draw, wx - ww/4 - 1 + ceil(ww / 2.) / 2.0, wy + wh / 2.0);
+			vec_scale(xw.draw, ceil(ww / 2.) / 2.0, MAX(wh, 1) / 2.0);
+			vec_new_sub_path(xw.draw);
+			vec_arc_negative(xw.draw, 0, 0, 1, -1.5 * M_PI, -2 * M_PI);
+			vec_restore(xw.draw);
+			vec_stroke(xw.draw);
+			vec_restore(xw.draw);
 			adddamage(winx, wy - wlw, width, wh + 2 * wlw);
 #elif UNDERCURL_STYLE == UNDERCURL_SPIKY
 			// Make the underline corridor larger
@@ -4406,9 +3953,9 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 
 				// Draw the lines
 				resetclip();
-				cairo_save(xw.draw);
-				cairo_rectangle(xw.draw, winx, winy, width, win.ch);
-				cairo_clip(xw.draw);
+				vec_save(xw.draw);
+				vec_rectangle(xw.draw, winx, winy, width, win.ch);
+				vec_clip(xw.draw);
 				drawlines(&linecolor, wlw, points, npoints, 1);
 
 				// Draw a second underline with an offset of 1 pixel
@@ -4417,7 +3964,7 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 
 					drawlines(&linecolor, wlw, points, npoints, 1);
 				}
-				cairo_restore(xw.draw);
+				vec_restore(xw.draw);
 				adddamage(winx, winy, width, win.ch);
 
 				// Free resources
@@ -4568,9 +4115,9 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 
 				// Draw the lines
 				resetclip();
-				cairo_save(xw.draw);
-				cairo_rectangle(xw.draw, winx, winy, width, win.ch);
-				cairo_clip(xw.draw);
+				vec_save(xw.draw);
+				vec_rectangle(xw.draw, winx, winy, width, win.ch);
+				vec_clip(xw.draw);
 				drawlines(&linecolor, wlw, points, npoints, 0);
 
 				// Draw a second underline with an offset of 1 pixel
@@ -4580,7 +4127,7 @@ xdrawglyphfontspecs(const GlyphFontSpec *specs, Glyph base, int len, int x, int 
 
 					drawlines(&linecolor, wlw, points, npoints, 0);
 				}
-				cairo_restore(xw.draw);
+				vec_restore(xw.draw);
 				adddamage(winx, winy, width, win.ch);
 
 				// Free resources
@@ -5041,8 +4588,8 @@ scrollpixels(void)
 	if ((y = scrolledrow(term.ocy)) >= 0)
 		term.dirty[y] = 1;
 
-	cairo_surface_flush(b->surface);
-	base = (unsigned char *)b->data + (size_t)top * b->stride;
+	base = (unsigned char *)pixman_image_get_data(b->pix);
+	base += (size_t)top * b->stride;
 	for (i = 0; i < term.nscrolls; i++) {
 		s = &term.scrolls[i];
 		m = abs(s->n);
@@ -5069,8 +4616,6 @@ scrollpixels(void)
 			a = MIN(y, e);
 			n = abs(e - y) + 1;
 			memmove(base + a * rowbytes, base + (a + s->n) * rowbytes, n * rowbytes);
-			cairo_surface_mark_dirty_rectangle(b->surface, 0, top + a * win.ch,
-					b->width, n * win.ch);
 			adddamage(0, top + a * win.ch, win.w, n * win.ch);
 		}
 	}
@@ -5081,10 +4626,21 @@ scrollpixels(void)
 int
 xstartdraw(void)
 {
+	struct timespec now;
+
 	if (!IS_SET(MODE_VISIBLE))
 		return 0;
 	if (!framechanged())
 		return 0;
+	/* redraw() can also be called from the parser, outside run(). */
+	if (framecb) {
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (framewait(&now) >= 0) {
+			drawn.valid = 0;
+			presentpending = 1;
+			return 0;
+		}
+	}
 	if (!startframe()) {
 		drawn.valid = 0; /* not painted after all */
 		return 0;
@@ -5287,10 +4843,247 @@ drawline(Line line, int x1, int y1, int x2)
 }
 #endif // WIDE_GLYPHS_PATCH | LIGATURES_PATCH
 
+/* Global state and overlays are not represented by the saved Glyphs. A frame
+ * involving any of these starts fresh, including the frame removing an overlay.
+ * Called after obtaining a buffer, before deciding which old pixels to copy. */
+static void
+paintprepare(void)
+{
+	int blocked = ime.preedit || ime.row >= 0;
+	int enabled = !forcedraw && lastbuf && lastbuf->width == win.w &&
+		lastbuf->height == win.h && painted.mode == win.mode &&
+		painted.screen == term.line;
+	#if REFLOW_PATCH
+	blocked |= term.nscrolls != 0;
+	#endif
+	#if SCROLLBACK_PATCH || REFLOW_PATCH
+	blocked |= term.scr != 0;
+	#endif
+	#if KEYBOARDSELECT_PATCH
+	blocked |= IS_SET(MODE_KBDSELECT);
+	#endif
+	#if SIXEL_PATCH
+	blocked |= term.images != NULL;
+	#endif
+	#if OPENURLONCLICK_PATCH
+	blocked |= url_y2 >= 0;
+	#endif
+	#if CURSOR_TRAIL_PATCH
+	blocked |= trailneedsframe();
+	#endif
+	enabled = enabled && !blocked && !painted.blocked;
+	if (painted.cols != term.col || painted.rows != term.row) {
+		free(painted.cells);
+		free(painted.valid);
+		painted.cells = xmalloc((size_t)term.col * term.row * sizeof(*painted.cells));
+		painted.valid = xmalloc((size_t)term.row);
+		painted.cols = term.col;
+		painted.rows = term.row;
+		enabled = 0;
+	}
+	if (!enabled && painted.valid)
+		memset(painted.valid, 0, (size_t)painted.rows);
+	#if LIGATURES_PATCH && WIDE_GLYPHS_PATCH
+	if (!enabled)
+		fcftspillleft = fcftspillright = 0;
+	#endif
+	painted.enabled = enabled;
+	painted.blocked = blocked;
+	painted.mode = win.mode;
+	painted.screen = term.line;
+}
+
+/* Decorations may depend on the original attribute-run endpoints. Cell-local
+ * geometry can share the two-pass renderer's bounded text updates. */
+static int
+paintplain(Line line, int row, int left, int right)
+{
+	const uint32_t allowed = ATTR_SET | ATTR_BOLD | ATTR_FAINT | ATTR_ITALIC |
+		ATTR_REVERSE | ATTR_INVISIBLE | ATTR_WRAP | ATTR_WIDE | ATTR_WDUMMY
+		#if BOXDRAW_PATCH && LIGATURES_PATCH && WIDE_GLYPHS_PATCH
+		| ATTR_BOXDRAW
+		#endif
+		;
+	/* Traditional double rules occupy at least three pixels. Their tiny-cell
+	 * overflow is kept on the original full-row path. */
+	#if BOXDRAW_PATCH && LIGATURES_PATCH && WIDE_GLYPHS_PATCH
+	if (win.cw < 3 || win.ch < 3)
+		return 0;
+	#endif
+	for (int x = left; x < right; x++)
+		if ((line[x].mode & ~allowed) || selected(x, row))
+			return 0;
+	return 1;
+}
+
+/* Vector geometry resets its own cell clip; its destination needs the same
+ * outer pixel limit as text and the directly written box rectangles. */
+static int
+paintboxes(Line line, int left, int right)
+{
+	#if BOXDRAW_PATCH
+	for (int x = left; x < right; x++)
+		if (line[x].mode & ATTR_BOXDRAW)
+			return 1;
+	#endif
+	return 0;
+}
+
+/* fcft shapes non-space words, stopping at geometry. A dummy cell always
+ * belongs to its preceding wide character, including during half-cell edits. */
+static int
+paintjoin(Line line, int boundary)
+{
+	const Glyph *a = &line[boundary - 1], *b = &line[boundary];
+	if (b->mode & ATTR_WDUMMY)
+		return 1;
+	#if BOXDRAW_PATCH
+	if ((a->mode | b->mode) & ATTR_BOXDRAW)
+		return 0;
+	#endif
+	return a->u != ' ' && b->u != ' ';
+}
+
+/* Find actual ink bounds using the same complete words and attribute groups as
+ * the full renderer. Old ink must be erased even when a new glyph is narrower.
+ * Unchanged neighbours extending into the clip must be restored too. */
+static void
+paintink(Line line, int left, int right, int row, int *px1, int *px2)
+{
+	int start, x, count;
+	for (start = left; start < right; start = x) {
+		for (x = start + 1; x < right; x++)
+			if (!(line[x].mode & ATTR_WDUMMY) && ATTRCMP(line[start], line[x]))
+				break;
+		count = xmakeglyphfontspecs(xw.specbuf, &line[start], x - start, start, row);
+		for (int i = 0; i < count; i++) {
+			const GlyphFontSpec *s = &xw.specbuf[i];
+			const struct fcft_glyph *g = s->imageglyph;
+			if (g && g->pix && g->width > 0) {
+				int px = (int)roundf(s->x) + g->x;
+				*px1 = MIN(*px1, px);
+				*px2 = MAX(*px2, px + g->width);
+			}
+		}
+	}
+}
+
+static void
+paintbounds(Line line, int row, int left, int right)
+{
+	Line old = &painted.cells[(size_t)row * term.col];
+	#if ANYSIZE_PATCH
+	int border = win.hborderpx;
+	#else
+	int border = borderpx;
+	#endif
+
+	while (left < right && !memcmp(&old[left], &line[left], sizeof(Glyph)))
+		left++;
+	while (right > left && !memcmp(&old[right - 1], &line[right - 1], sizeof(Glyph)))
+		right--;
+	if (left == right) {
+		paintclip.active = 1;
+		paintclip.left = paintclip.right = 0;
+		return;
+	}
+	/* Expand to word boundaries in BOTH versions. A changed space can split
+	 * or join a ligature, and a wide glyph includes its dummy cell. */
+	while (left > 0 && (paintjoin(old, left) || paintjoin(line, left)))
+		left--;
+	while (right < term.col && (paintjoin(old, right) || paintjoin(line, right)))
+		right++;
+	/* Preparing two extra text runs is worthwhile only for a small update. */
+	if (right - left > term.col / 2)
+		return;
+	int px1 = left == 0 ? 0 : border + left * win.cw;
+	int px2 = right == term.col ? win.w : border + right * win.cw;
+	paintink(old, left, right, row, &px1, &px2);
+	paintink(line, left, right, row, &px1, &px2);
+	paintclip.active = 1;
+	paintclip.left = MAX(0, px1);
+	paintclip.right = MIN(win.w, px2);
+}
+
+#if LIGATURES_PATCH && WIDE_GLYPHS_PATCH
+static void
+paintcolumns(Line line, int *left, int *right)
+{
+	#if ANYSIZE_PATCH
+	int border = win.hborderpx;
+	#else
+	int border = borderpx;
+	#endif
+	/* The old frame has already supplied bounds for all unchanged glyphs;
+	 * paintink() also supplies them for the new words before we get here.
+	 * Account for ink from distant cells, not just one adjacent character. */
+	int64_t x1 = (int64_t)paintclip.left - border - fcftspillright;
+	int64_t x2 = (int64_t)paintclip.right - border + fcftspillleft;
+	*left = MAX(0, MIN(term.col, x1 / win.cw));
+	*right = MAX(0, MIN(term.col, (x2 + win.cw - 1) / win.cw));
+	/* Shaping starts at complete words, just as in the full renderer. The
+	 * two-pass path preserves backgrounds before every foreground, even
+	 * when an attribute group is shortened at a space. */
+	while (*left > 0 && *left < term.col && paintjoin(line, *left))
+		--*left;
+	while (*right > 0 && *right < term.col && paintjoin(line, *right))
+		++*right;
+}
+#endif
+
 void
 xdrawline(Line line, int x1, int y1, int x2)
 {
-	drawline(line, x1, y1, x2);
+	int saved = curbuf && painted.cells && painted.cols == term.col &&
+		painted.rows == term.row && BETWEEN(y1, 0, term.row - 1) &&
+		x1 == 0 && x2 == term.col;
+	int left = 0, right = term.col;
+	/* Only the parser's explicitly bounded writes may narrow comparison,
+	 * eligibility checks and shadow copying. A plain dirty flag from any
+	 * other producer remains a whole-line invalidation. */
+	if (saved && painted.enabled && painted.valid[y1] && term.dirtycols &&
+	    term.dirty[y1] == DIRTY_PARTIAL) {
+		left = term.dirtycols[y1].left;
+		right = term.dirtycols[y1].right;
+	}
+	int plain = saved && !painted.blocked && paintplain(line, y1, left, right);
+	if (plain && painted.enabled && painted.valid[y1] && y1 != term.ocy &&
+	    y1 != term.c.y)
+		paintbounds(line, y1, left, right);
+	if (!paintclip.active || paintclip.left < paintclip.right) {
+		int left = x1, right = x2;
+		int clipped = 0;
+		#if LIGATURES_PATCH && WIDE_GLYPHS_PATCH
+		if (paintclip.active) {
+			paintcolumns(line, &left, &right);
+			if (paintboxes(line, left, right)) {
+				/* Keep the limit on the final destination: geometry may
+				 * reset its path clip or render through an alpha group. */
+				pixman_region32_t clip;
+				pixman_region32_init_rect(&clip, paintclip.left, 0,
+					paintclip.right - paintclip.left, win.h);
+				clipped = pixman_image_set_clip_region32(xw.pix, &clip);
+				pixman_region32_fini(&clip);
+				if (!clipped) {
+					pixman_image_set_clip_region32(xw.pix, NULL);
+					paintclip.active = 0;
+					left = x1;
+					right = x2;
+				}
+			}
+		}
+		#endif
+		drawline(line, left, y1, right);
+		if (clipped)
+			pixman_image_set_clip_region32(xw.pix, NULL);
+	}
+	paintclip.active = 0;
+	if (saved) {
+		if (plain)
+			memcpy(&painted.cells[(size_t)y1 * term.col + left], &line[left],
+			       (right - left) * sizeof(Glyph));
+		painted.valid[y1] = plain;
+	}
 	#if LIGATURES_PATCH
 	if (curbuf && restoredrows && x1 == 0 && x2 == term.col &&
 	    BETWEEN(y1, 0, restoredrowcap - 1))
@@ -5299,37 +5092,56 @@ xdrawline(Line line, int x1, int y1, int x2)
 }
 
 #if SIXEL_PATCH
-static cairo_surface_t *
+static pixman_image_t *
 sixelsurface(const ImageList *im, int width, int height)
 {
-	cairo_surface_t *src, *scaled;
-	cairo_t *cr;
+	pixman_image_t *src, *scaled = NULL;
+	pixman_transform_t transform;
+	pixman_fixed_t *filter;
+	int nfilter;
 
-	/* Source pixels stay owned by im for future zoom/output-scale rebuilds.
-	 * At native size a non-owning wrapper needs no second pixel allocation. */
-	src = cairo_image_surface_create_for_data(im->pixels, CAIRO_FORMAT_ARGB32,
-			im->width, im->height, im->width * 4);
-	if (cairo_surface_status(src) != CAIRO_STATUS_SUCCESS) {
-		cairo_surface_destroy(src);
+	if (width <= 0 || height <= 0 || im->width <= 0 || im->height <= 0 ||
+	    im->width > INT_MAX / 4)
 		return NULL;
-	}
-	if (width == im->width && height == im->height)
+	/* im owns these pixels across zoom/output-scale rebuilds. */
+	src = pixman_image_create_bits_no_clear(PIXMAN_a8r8g8b8,
+		im->width, im->height, (uint32_t *)im->pixels, im->width * 4);
+	if (!src || (width == im->width && height == im->height))
 		return src;
-	scaled = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-	if (cairo_surface_status(scaled) != CAIRO_STATUS_SUCCESS) {
-		cairo_surface_destroy(scaled);
-		cairo_surface_destroy(src);
-		return NULL;
-	}
-	cr = cairo_create(scaled);
-	cairo_scale(cr, (double)width / im->width, (double)height / im->height);
-	cairo_set_source_surface(cr, src, 0, 0);
-	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
-	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-	cairo_paint(cr);
-	cairo_destroy(cr);
-	cairo_surface_destroy(src);
+	scaled = pixman_image_create_bits(PIXMAN_a8r8g8b8, width, height, NULL, 0);
+	if (!scaled)
+		goto fail;
+	pixman_transform_init_scale(&transform,
+		pixman_double_to_fixed((double)im->width / width),
+		pixman_double_to_fixed((double)im->height / height));
+	if (!pixman_image_set_transform(src, &transform))
+		goto fail;
+	/* Integrate source pixels when reducing, interpolate when enlarging.
+	 * FILTER_GOOD alone is bilinear in pixman and aliases downscaled images.
+	 * NONE repetition matches the transparent outside of the original image. */
+	filter = pixman_filter_create_separable_convolution(&nfilter,
+		transform.matrix[0][0], transform.matrix[1][1],
+		width < im->width ? PIXMAN_KERNEL_BOX : PIXMAN_KERNEL_LINEAR,
+		height < im->height ? PIXMAN_KERNEL_BOX : PIXMAN_KERNEL_LINEAR,
+		width < im->width ? PIXMAN_KERNEL_BOX : PIXMAN_KERNEL_IMPULSE,
+		height < im->height ? PIXMAN_KERNEL_BOX : PIXMAN_KERNEL_IMPULSE, 8, 8);
+	if (!filter)
+		goto fail;
+	int ok = pixman_image_set_filter(src, PIXMAN_FILTER_SEPARABLE_CONVOLUTION,
+		filter, nfilter);
+	free(filter);
+	if (!ok)
+		goto fail;
+	pixman_image_set_repeat(src, PIXMAN_REPEAT_NONE);
+	pixman_image_composite32(PIXMAN_OP_SRC, src, NULL, scaled,
+		0, 0, 0, 0, 0, 0, width, height);
+	pixman_image_unref(src);
 	return scaled;
+fail:
+	if (scaled)
+		pixman_image_unref(scaled);
+	pixman_image_unref(src);
+	return NULL;
 }
 #endif
 
@@ -5338,7 +5150,7 @@ xfinishdraw(void)
 {
 	#if SIXEL_PATCH
 	ImageList *im, *next;
-	cairo_surface_t *scaled;
+	pixman_image_t *scaled;
 	int width, height;
 	int del, desty, mode, x1, x2, xend;
 	#if ANYSIZE_PATCH
@@ -5395,14 +5207,10 @@ xfinishdraw(void)
 				int dx = bw + x1 * win.cw;
 				if (sw <= 0)
 					continue;
-				cairo_save(xw.draw);
-				cairo_rectangle(xw.draw, dx, desty, sw, height);
-				cairo_clip(xw.draw);
-				cairo_set_operator(xw.draw, im->transparent ?
-						CAIRO_OPERATOR_OVER : CAIRO_OPERATOR_SOURCE);
-				cairo_set_source_surface(xw.draw, scaled, dx - sx, desty);
-				cairo_paint(xw.draw);
-				cairo_restore(xw.draw);
+				/* Pixman clips to the destination image bounds. Source offsets
+				 * select only terminal cells still marked as SIXEL. */
+				pixman_image_composite32(im->transparent ? PIXMAN_OP_OVER : PIXMAN_OP_SRC,
+					scaled, NULL, xw.pix, sx, 0, 0, 0, dx, desty, sw, height);
 				adddamage(dx, desty, sw, height);
 				del = 0;
 			}
@@ -5680,6 +5488,7 @@ repeatkey(struct timespec *now)
 		return;
 	if (TIMEDIFF((*now), kbrepeat.next) < 0)
 		return;
+	frameresume();
 	#if KITTY_KEYBOARD_PATCH
 	kittyevent = KK_REPEAT;
 	kpress(kbrepeat.key);
@@ -5699,12 +5508,54 @@ repeatkey(struct timespec *now)
 		kbrepeat.next = *now;
 }
 
+#if LIGATURES_PATCH
+#define TEXTRUN_IDLE 30000.0
+#define TEXTRUN_IDLE_BYTES (1024u * 1024u)
+static struct {
+	struct timespec since;
+	int pending;
+} textrunidle;
+
+/* One deadline after actual text-cache use, then no periodic wakeups. Font
+ * glyphs remain intact; only independently owned run metadata/bitmaps shrink. */
+static double
+trimtextruns(const struct timespec *now)
+{
+	double left;
+
+	if (curbuf)
+		return -1; /* specs may still reference retired bitmaps */
+	if (textrun_bytes + textrun_imagebytes <= TEXTRUN_IDLE_BYTES) {
+		textrunidle.pending = 0;
+		textrun_activity = 0;
+		return -1;
+	}
+	if (textrun_activity) {
+		textrunidle.since = *now;
+		textrunidle.pending = 1;
+		textrun_activity = 0;
+	}
+	if (!textrunidle.pending)
+		return -1;
+	left = TEXTRUN_IDLE - TIMEDIFF((*now), textrunidle.since);
+	if (left > 0)
+		return left;
+	textrunidle.pending = 0;
+	/* Avoid allocator-wide work for small evictions; this only runs once
+	 * after a long idle period and a substantial batch was actually freed. */
+	if (textrun_trim(TEXTRUN_IDLE_BYTES) >= 1024u * 1024u)
+		malloc_trim(0);
+	return -1;
+}
+#endif
+
 void
 run(void)
 {
 	fd_set rfd, wfd;
 	int wlfd = wl_display_get_fd(xw.dpy), ttyfd, xev, drawing, nfds, i;
 	int prevevents, needdraw = 1, blinkattr = 0;
+	unsigned int prevframes;
 	struct timespec seltv, *tv, now, lastblink, trigger;
 	double timeout, rt, bt;
 
@@ -5729,11 +5580,20 @@ run(void)
 
 	for (timeout = -1, drawing = 0, lastblink = (struct timespec){0};;) {
 		/* dispatch what is already queued and flush requests */
+		prevevents = wlevents;
+		prevframes = frameevents;
 		while (wl_display_prepare_read(xw.dpy) != 0) {
 			if (wl_display_dispatch_pending(xw.dpy) < 0)
 				die("wayland display error: %s\n", strerror(errno));
 		}
 		wl_display_flush(xw.dpy);
+		/* A queued configure, callback or buffer release can invalidate a
+		 * long fallback wait. Only newly dispatched events shorten it: a
+		 * pending draw with all buffers busy must still sleep for release. */
+		if (wlevents != prevevents || frameevents != prevframes)
+			timeout = 0;
+		if (wlevents != prevevents)
+			needdraw = 1; /* survives an EINTR before the second dispatch */
 
 		FD_ZERO(&rfd);
 		FD_ZERO(&wfd);
@@ -5760,6 +5620,11 @@ run(void)
 		rt = repeattimeout(&now);
 		if (rt >= 0 && (timeout < 0 || rt < timeout))
 			timeout = rt;
+		/* Also service this deadline while synchronized updates suspend
+		 * drawing, or output is still being coalesced. */
+		bt = trimresize(&now);
+		if (bt >= 0 && (timeout < 0 || bt < timeout))
+			timeout = bt;
 
 		seltv.tv_sec = timeout / 1E3;
 		seltv.tv_nsec = 1E6 * (timeout - 1E3 * seltv.tv_sec);
@@ -5787,11 +5652,11 @@ run(void)
 			ttyread();
 		#endif // SYNC_PATCH
 
-		prevevents = wlevents;
 		if (wl_display_dispatch_pending(xw.dpy) < 0)
 			die("wayland display error: %s\n", strerror(errno));
 		repeatkey(&now);
 		if (paste.fd >= 0 && FD_ISSET(paste.fd, &rfd)) {
+			frameresume();
 			pasteread();
 			wlevents++;
 		}
@@ -5890,7 +5755,7 @@ run(void)
 			if (fw >= 0) {
 				if (timeout < 0 || fw < timeout)
 					timeout = fw;
-				continue;
+				goto maintenance;
 			}
 		}
 
@@ -5917,18 +5782,29 @@ run(void)
 		#if REFLOW_PATCH
 		thistcompact();
 		#endif
-		wl_display_flush(xw.dpy);
 		#if CURSOR_TRAIL_PATCH
 		/* Handle a missing callback/free buffer without spinning. */
-		if (trailneedsframe())
-			timeout = timeout < 0 ? FRAME_TIMEOUT : MIN(timeout, FRAME_TIMEOUT);
+		if (trailneedsframe()) {
+			double fw = framewait(&now);
+			if (fw < 0)
+				fw = FRAME_TIMEOUT;
+			timeout = timeout < 0 ? fw : MIN(timeout, fw);
+		}
 		#endif
 		drawing = 0;
 		needdraw = 0;
+	maintenance:
+		wl_display_flush(xw.dpy);
+		clock_gettime(CLOCK_MONOTONIC, &now);
 		/* one more wakeup after the last frame, then none at all */
 		bt = trimbuffers(&now);
 		if (bt >= 0 && (timeout < 0 || bt < timeout))
 			timeout = bt;
+		#if LIGATURES_PATCH
+		bt = trimtextruns(&now);
+		if (bt >= 0 && (timeout < 0 || bt < timeout))
+			timeout = bt;
+		#endif
 	}
 }
 
@@ -6083,9 +5959,6 @@ run:
 		opt_title = (opt_line || !opt_cmd) ? "st" : opt_cmd[0];
 
 	setlocale(LC_CTYPE, "");
-	#if LIGATURES_PATCH
-	hbcreatebuffer();
-	#endif // LIGATURES_PATCH
 
 	#if ANYGEOMETRY_PATCH
 	switch (geometry) {
@@ -6116,9 +5989,6 @@ run:
 		die("Can't change to working directory %s\n", opt_dir);
 	#endif // WORKINGDIR_PATCH
 	run();
-	#if LIGATURES_PATCH
-	hbdestroybuffer();
-	#endif // LIGATURES_PATCH
 
 	return 0;
 }

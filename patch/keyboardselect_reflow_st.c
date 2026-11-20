@@ -19,6 +19,7 @@ typedef struct {
 	int y;
 	Line line;
 	int len;
+	int stored, readonly;
 } KCursor;
 
 static int kbds_in_use, kbds_quant;
@@ -29,6 +30,26 @@ static int kbds_finddir, kbds_findtill;
 static Glyph *kbds_searchstr;
 static Rune kbds_findchar;
 static KCursor kbds_c, kbds_oc;
+
+static const Glyph *
+kbds_cell(const KCursor *c, int x)
+{
+	return &c->line[c->readonly ? MIN(x, c->stored - 1) : x];
+}
+
+static void
+kbds_loadline(KCursor *c)
+{
+	if (c->readonly) {
+		LineView view = tlineview(c->y);
+		c->line = view.line;
+		c->stored = view.stored;
+		c->len = tviewlen(view);
+	} else {
+		c->line = TLINE(c->y);
+		c->len = tlinelen(c->line);
+	}
+}
 
 void
 kbds_drawstatusbar(int y)
@@ -148,7 +169,7 @@ kbds_bot(void)
 int
 kbds_iswrapped(KCursor *c)
 {
-    return c->len > 0 && (c->line[c->len-1].mode & ATTR_WRAP);
+	return c->len > 0 && (kbds_cell(c, c->len-1)->mode & ATTR_WRAP);
 }
 
 int
@@ -202,14 +223,18 @@ kbds_copytoclipboard(void)
 void
 kbds_clearhighlights(void)
 {
-	int x, y;
-	Line line;
+	int x, y, i;
 
-	for (y = (IS_SET(MODE_ALTSCREEN) ? 0 : -term.histf); y < term.row; y++) {
-		line = TLINEABS(y);
+	/* Clearing a repeated tail applies equally to all of its logical cells. */
+	if (!IS_SET(MODE_ALTSCREEN))
+		for (y = -term.histf; y < 0; y++) {
+			i = (term.histi + y + 1 + HISTSIZE) % HISTSIZE;
+			for (x = 0; x < MIN(term.col, abs(term.histlen[i])); x++)
+				term.hist[i][x].mode &= ~ATTR_HIGHLIGHT;
+		}
+	for (y = 0; y < term.row; y++)
 		for (x = 0; x < term.col; x++)
-			line[x].mode &= ~ATTR_HIGHLIGHT;
-	}
+			term.line[y][x].mode &= ~ATTR_HIGHLIGHT;
 	tfulldirt();
 }
 
@@ -222,6 +247,7 @@ kbds_moveto(int x, int y)
 		kscrolldown(&((Arg){ .i = y - term.row + 1 }));
 	kbds_c.x = (x < 0) ? 0 : (x > term.col-1) ? term.col-1 : x;
 	kbds_c.y = (y < 0) ? 0 : (y > term.row-1) ? term.row-1 : y;
+	kbds_c.readonly = 0;
 	kbds_c.line = TLINE(kbds_c.y);
 	kbds_c.len = tlinelen(kbds_c.line);
 	if (kbds_c.x > 0 && (kbds_c.line[kbds_c.x].mode & ATTR_WDUMMY))
@@ -234,26 +260,24 @@ kbds_moveforward(KCursor *c, int dx, int wrap)
 	KCursor n = *c;
 
 	n.x += dx;
-	if (n.x >= 0 && n.x < term.col && (n.line[n.x].mode & ATTR_WDUMMY))
+	if (n.x >= 0 && n.x < term.col && (kbds_cell(&n, n.x)->mode & ATTR_WDUMMY))
 		n.x += dx;
 
 	if (n.x < 0) {
 		if (!wrap || --n.y < kbds_top())
 			return 0;
-		n.line = TLINE(n.y);
-		n.len = tlinelen(n.line);
+		kbds_loadline(&n);
 		if ((wrap & KBDS_WRAP_LINE) && kbds_iswrapped(&n))
 			n.x = n.len-1;
 		else if (wrap & KBDS_WRAP_EDGE)
 			n.x = term.col-1;
 		else
 			return 0;
-		n.x -= (n.x > 0 && (n.line[n.x].mode & ATTR_WDUMMY)) ? 1 : 0;
+		n.x -= (n.x > 0 && (kbds_cell(&n, n.x)->mode & ATTR_WDUMMY)) ? 1 : 0;
 	} else if (n.x >= term.col) {
 		if (((wrap & KBDS_WRAP_EDGE) ||
 		    ((wrap & KBDS_WRAP_LINE) && kbds_iswrapped(&n))) && ++n.y <= kbds_bot()) {
-			n.line = TLINE(n.y);
-			n.len = tlinelen(n.line);
+			kbds_loadline(&n);
 			n.x = 0;
 		} else {
 			return 0;
@@ -261,8 +285,7 @@ kbds_moveforward(KCursor *c, int dx, int wrap)
 	} else if (n.x >= n.len && dx > 0 && (wrap & KBDS_WRAP_LINE)) {
 		if (n.x == n.len && kbds_iswrapped(&n) && n.y < kbds_bot()) {
 			++n.y;
-			n.line = TLINE(n.y);
-			n.len = tlinelen(n.line);
+			kbds_loadline(&n);
 			n.x = 0;
 		} else if (!(wrap & KBDS_WRAP_EDGE)) {
 			return 0;
@@ -285,14 +308,22 @@ kbds_ismatch(KCursor c)
 		if (kbds_searchstr[i].mode & ATTR_WDUMMY)
 			continue;
 		if ((next++ && !kbds_moveforward(&c, 1, KBDS_WRAP_LINE)) ||
-		    (kbds_searchcase && kbds_searchstr[i].u != c.line[c.x].u) ||
-		    (!kbds_searchcase && kbds_searchstr[i].u != towlower(c.line[c.x].u)))
+		    (kbds_searchcase && kbds_searchstr[i].u != kbds_cell(&c, c.x)->u) ||
+		    (!kbds_searchcase && kbds_searchstr[i].u != towlower(kbds_cell(&c, c.x)->u)))
 			return 0;
 	}
 
 	for (i = 0; i < kbds_searchlen; i++) {
 		if (!(kbds_searchstr[i].mode & ATTR_WDUMMY)) {
-			m.line[m.x].mode |= ATTR_HIGHLIGHT;
+			/* Prefix cells are unique and can be highlighted in place.
+			 * A match inside the repeated tail needs independent cells;
+			 * expansion may relocate the row, so refresh this cursor. */
+			if (m.readonly && m.stored < term.col && m.x >= m.stored - 1) {
+				TLINE(m.y)[m.x].mode |= ATTR_HIGHLIGHT;
+				kbds_loadline(&m);
+			} else {
+				m.line[m.x].mode |= ATTR_HIGHLIGHT;
+			}
 			kbds_moveforward(&m, 1, KBDS_WRAP_LINE);
 		}
 	}
@@ -302,17 +333,20 @@ kbds_ismatch(KCursor c)
 int
 kbds_searchall(void)
 {
-	KCursor c;
+	KCursor c = {.readonly = 1};
 	int count = 0;
 
 	if (!kbds_searchlen)
 		return 0;
 
 	for (c.y = kbds_top(); c.y <= kbds_bot(); c.y++) {
-		c.line = TLINE(c.y);
-		c.len = tlinelen(c.line);
-		for (c.x = 0; c.x < c.len; c.x++)
-			count += kbds_ismatch(c);
+		kbds_loadline(&c);
+		for (c.x = 0; c.x < c.len; c.x++) {
+			if (kbds_ismatch(c)) {
+				count++;
+				kbds_loadline(&c);
+			}
+		}
 	}
 	tfulldirt();
 
@@ -329,6 +363,8 @@ kbds_searchnext(int dir)
 		kbds_quant = 0;
 		return;
 	}
+	c.readonly = 1;
+	kbds_loadline(&c);
 
 	if (dir < 0 && c.x > c.len)
 		c.x = c.len;
@@ -342,12 +378,12 @@ kbds_searchnext(int dir)
 				c.y = kbds_top(), wrapped++;
 			if (wrapped > 1)
 				break;;
-			c.line = TLINE(c.y);
-			c.len = tlinelen(c.line);
+			kbds_loadline(&c);
 			c.x = (dir < 0 && c.len > 0) ? c.len-1 : 0;
-			c.x -= (c.x > 0 && (c.line[c.x].mode & ATTR_WDUMMY)) ? 1 : 0;
+			c.x -= (c.x > 0 && (kbds_cell(&c, c.x)->mode & ATTR_WDUMMY)) ? 1 : 0;
 		}
 		if (kbds_ismatch(c)) {
+			kbds_loadline(&c);
 			n = c;
 			kbds_quant--;
 		}

@@ -1,11 +1,14 @@
 st - simple terminal
 --------------------
-st is a simple terminal emulator for X which sucks less.
+st is a simple terminal emulator for Wayland.
 
 
 Requirements
 ------------
-In order to build st you need the Xlib header files.
+Build dependencies: wayland-client, wayland-cursor, wayland-protocols,
+wayland-scanner, xkbcommon, Fontconfig, FreeType, pixman and fcft.
+With LIGATURES_PATCH enabled, fcft must provide text-run shaping support.
+Cairo and X11/Xft development packages are not required.
 
 
 Installation

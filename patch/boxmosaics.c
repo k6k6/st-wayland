@@ -1,8 +1,8 @@
 /* Additional Unicode mosaics and outlined/negative geometry.
- * MIT/X Consortium License. Original Cairo implementation using Unicode
+ * MIT/X Consortium License. Original vector implementation using Unicode
  * character names; codepoint semantics cross-checked against Ghostty.
  * Included after boxlines_extra.c and boxblocks_extra.c. The caller owns
- * cell clipping, foreground RGBA, translation and Cairo state preservation.
+ * cell clipping, foreground RGBA, translation and vector state preservation.
  */
 static int
 isboxmosaic(Rune u)
@@ -39,7 +39,7 @@ static const unsigned char box_octants[230] = {
 };
 
 static void
-boxmosaic_grid(cairo_t *cr, int w, int h, int rows, unsigned mask, int separated)
+boxmosaic_grid(VecContext *cr, int w, int h, int rows, unsigned mask, int separated)
 {
 	int m = w < h ? w : h;
 	int gap = separated && w >= 6 && h >= rows*3 ? (m/12 > 0 ? m/12 : 1) : 0;
@@ -50,31 +50,31 @@ boxmosaic_grid(cairo_t *cr, int w, int h, int rows, unsigned mask, int separated
 		int y0 = bbe_fraction(h, i/2, rows), y1 = bbe_fraction(h, i/2+1, rows);
 		bbe_rect(cr, x0+gap, y0+gap, x1-gap, y1-gap);
 	}
-	cairo_fill(cr);
+	vec_fill(cr);
 }
 
 static void
-boxmosaic_negative(cairo_t *cr, int w, int h, Rune u, int bold)
+boxmosaic_negative(VecContext *cr, int w, int h, Rune u, int bold)
 {
 	static const Rune holes[] = {0x2573, 0x1fba3, 0x1fbae};
-	cairo_pattern_t *mask;
+	VecPattern *mask;
 	/* Invert coverage inside a temporary alpha group, NOT the terminal
 	 * background. Apply the saved foreground once, retaining its alpha. */
-	cairo_save(cr);
-	cairo_push_group_with_content(cr, CAIRO_CONTENT_ALPHA);
-	cairo_set_source_rgba(cr, 1, 1, 1, 1);
-	cairo_rectangle(cr, 0, 0, w, h);
-	cairo_fill(cr);
-	cairo_set_operator(cr, CAIRO_OPERATOR_DEST_OUT);
+	vec_save(cr);
+	vec_push_group_with_content(cr, VEC_CONTENT_ALPHA);
+	vec_set_source_rgba(cr, 1, 1, 1, 1);
+	vec_rectangle(cr, 0, 0, w, h);
+	vec_fill(cr);
+	vec_set_operator(cr, VEC_OPERATOR_DEST_OUT);
 	drawboxlinesextra(cr, w, h, holes[u-0x1fbbd], bold);
-	mask = cairo_pop_group(cr);
-	cairo_restore(cr);
-	cairo_mask(cr, mask);
-	cairo_pattern_destroy(mask);
+	mask = vec_pop_group(cr);
+	vec_restore(cr);
+	vec_mask(cr, mask);
+	vec_pattern_destroy(mask);
 }
 
 static void
-drawboxmosaic(cairo_t *cr, int w, int h, Rune u, int bold)
+drawboxmosaic(VecContext *cr, int w, int h, Rune u, int bold)
 {
 	/* Quarter-grid rectangles: x0,y0,x1,y1. U+1CEA0..AF are partial
 	 * strips, NOT all sixteen possible single-sixteenth positions. */
@@ -90,7 +90,7 @@ drawboxmosaic(cairo_t *cr, int w, int h, Rune u, int bold)
 	int i, x0, x1;
 	const unsigned char *r;
 	if (w <= 0 || h <= 0 || !isboxmosaic(u)) return;
-	cairo_new_path(cr);
+	vec_new_path(cr);
 	if (u >= 0x1cd00 && u <= 0x1cde5) {
 		boxmosaic_grid(cr, w, h, 4, box_octants[u-0x1cd00], 0);
 		return;
@@ -126,13 +126,13 @@ drawboxmosaic(cairo_t *cr, int w, int h, Rune u, int bold)
 		double p[4][2] = {{s/2,s/2}, {w-s/2,s/2}, {w-s/2,h-s/2}, {s/2,h-s/2}};
 		i = u == 0x25f8 ? 0 : u == 0x25f9 ? 1 : u == 0x25fa ? 3 : 2;
 		x0 = (i+1)%4; x1 = (i+3)%4;
-		cairo_move_to(cr, p[i][0], p[i][1]);
-		cairo_line_to(cr, p[x0][0], p[x0][1]);
-		cairo_line_to(cr, p[x1][0], p[x1][1]);
-		cairo_close_path(cr);
-		cairo_set_line_width(cr, s);
-		cairo_stroke(cr);
+		vec_move_to(cr, p[i][0], p[i][1]);
+		vec_line_to(cr, p[x0][0], p[x0][1]);
+		vec_line_to(cr, p[x1][0], p[x1][1]);
+		vec_close_path(cr);
+		vec_set_line_width(cr, s);
+		vec_stroke(cr);
 		return;
 	}
-	cairo_fill(cr);
+	vec_fill(cr);
 }

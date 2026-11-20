@@ -13,11 +13,7 @@ PKG_CONFIG = pkg-config
 WAYLAND_SCANNER = `$(PKG_CONFIG) --variable=wayland_scanner wayland-scanner`
 WAYLAND_PROTOCOLS = `$(PKG_CONFIG) --variable=pkgdatadir wayland-protocols`
 
-# Uncomment the lines below for the ligatures patch / LIGATURES_PATCH
-LIGATURES_C = hb.c
-LIGATURES_H = hb.h
-LIGATURES_INC = `$(PKG_CONFIG) --cflags harfbuzz`
-LIGATURES_LIBS = `$(PKG_CONFIG) --libs harfbuzz`
+# LIGATURES_PATCH uses fcft's text-run shaping support.
 
 # Uncomment this for the SIXEL patch / SIXEL_PATCH
 SIXEL_C = sixel.c sixel_hls.c
@@ -27,16 +23,20 @@ SIXEL_C = sixel.c sixel_hls.c
 NETWMICON_LIBS =
 
 # includes and libs
-INCS = `$(PKG_CONFIG) --cflags wayland-client wayland-cursor xkbcommon cairo cairo-ft` \
+# fcft's public header only requires pixman. Some distributions omit tllist's
+# pkg-config file (a private, header-only build dependency), so use -lfcft
+# directly rather than expanding fcft's private dependencies via --cflags.
+FCFT_INCS = `$(PKG_CONFIG) --cflags pixman-1`
+FCFT_LIBS = -lfcft `$(PKG_CONFIG) --libs pixman-1`
+INCS = `$(PKG_CONFIG) --cflags wayland-client wayland-cursor xkbcommon` \
        `$(PKG_CONFIG) --cflags fontconfig` \
        `$(PKG_CONFIG) --cflags freetype2` \
-       $(LIGATURES_INC)
+       $(FCFT_INCS)
 LIBS = -lm -lutil -lrt \
-       `$(PKG_CONFIG) --libs wayland-client wayland-cursor xkbcommon cairo cairo-ft` \
+       `$(PKG_CONFIG) --libs wayland-client wayland-cursor xkbcommon` \
        `$(PKG_CONFIG) --libs fontconfig` \
        `$(PKG_CONFIG) --libs freetype2` \
-       $(LIGATURES_LIBS) \
-       $(NETWMICON_LIBS)
+       $(NETWMICON_LIBS) $(FCFT_LIBS)
 
 # flags
 CFLAGS = -O2 -march=native -flto

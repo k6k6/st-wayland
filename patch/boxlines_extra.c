@@ -1,8 +1,8 @@
-/* Extra cell-local box lines for the Cairo backend: dashed/rounded U+2500
+/* Extra cell-local box lines for the vector backend: dashed/rounded U+2500
  * forms, diagonal legacy-computing forms, and double diagonals. Geometry is
  * original, following Unicode character names (including Unicode 16 forms).
- * Include after Rune and Cairo declarations; requires <math.h>. The caller
- * supplies foreground, cell translation/clip and saves/restores Cairo state
+ * Include after Rune and vector declarations; requires <math.h>. The caller
+ * supplies foreground, cell translation/clip and saves/restores vector state
  * AND path. No backgrounds are painted here. Diagonal anchors use actual
  * cell edges/halves, not rounded pixel centres, so odd-sized cells tile too.
  */
@@ -27,7 +27,7 @@ isboxlinesextra(Rune u)
  * intersection of the parallel lines, keeping both rails equally spaced.
  */
 static void
-boxextra_poly(cairo_t *cr, const double *x, const double *y, int n,
+boxextra_poly(VecContext *cr, const double *x, const double *y, int n,
               double offset, double extension)
 {
 	double nx[2], ny[2], px[3], py[3], dx, dy, len, k;
@@ -46,13 +46,13 @@ boxextra_poly(cairo_t *cr, const double *x, const double *y, int n,
 	}
 	px[n-1] = x[n-1] + offset * nx[n-2] + extension * ny[n-2];
 	py[n-1] = y[n-1] + offset * ny[n-2] - extension * nx[n-2];
-	cairo_move_to(cr, px[0], py[0]);
+	vec_move_to(cr, px[0], py[0]);
 	for (i = 1; i < n; ++i)
-		cairo_line_to(cr, px[i], py[i]);
+		vec_line_to(cr, px[i], py[i]);
 }
 
 static void
-drawboxlinesextra(cairo_t *cr, int w, int h, Rune u, int bold)
+drawboxlinesextra(VecContext *cr, int w, int h, Rune u, int bold)
 {
 	/* Point indices: TL TC TR / ML MC MR / BL BC BR. */
 	static const unsigned char diamond[] = {
@@ -76,13 +76,13 @@ drawboxlinesextra(cairo_t *cr, int w, int h, Rune u, int bold)
 		s = fmax(s + 1, round(1.5 * s));
 	cx = ceil((w - s) / 2) + s / 2;
 	cy = ceil((h - s) / 2) + s / 2;
-	cairo_new_path(cr);
-	cairo_set_antialias(cr, CAIRO_ANTIALIAS_GRAY);
-	cairo_set_dash(cr, NULL, 0, 0);
-	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
-	cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
-	cairo_set_miter_limit(cr, 1000);
-	cairo_set_line_width(cr, s);
+	vec_new_path(cr);
+	vec_set_antialias(cr, VEC_ANTIALIAS_GRAY);
+	vec_set_dash(cr, NULL, 0, 0);
+	vec_set_line_cap(cr, VEC_LINE_CAP_BUTT);
+	vec_set_line_join(cr, VEC_LINE_JOIN_MITER);
+	vec_set_miter_limit(cr, 1000);
+	vec_set_line_width(cr, s);
 	if ((u >= 0x2504 && u <= 0x250b) || (u >= 0x254c && u <= 0x254f)) {
 		vertical = (u & 2) != 0;
 		count = u >= 0x254c ? 2 : u >= 0x2508 ? 4 : 3;
@@ -97,11 +97,11 @@ drawboxlinesextra(cairo_t *cr, int w, int h, Rune u, int bold)
 			b = floor((i + 0.85) * m / count);
 			if (b <= a) b = a + 1;
 			if (vertical)
-				cairo_rectangle(cr, ceil(cx-thick/2), a, thick, b-a);
+				vec_rectangle(cr, ceil(cx-thick/2), a, thick, b-a);
 			else
-				cairo_rectangle(cr, a, ceil(cy-thick/2), b-a, thick);
+				vec_rectangle(cr, a, ceil(cy-thick/2), b-a, thick);
 		}
-		cairo_fill(cr);
+		vec_fill(cr);
 		return;
 	}
 	if (u >= 0x256d && u <= 0x2570) {
@@ -111,41 +111,41 @@ drawboxlinesextra(cairo_t *cr, int w, int h, Rune u, int bold)
 		a = fmin(fabs(ex-cx), fabs(ey-cy));
 		/* Leave a full straight pixel at each edge whenever space permits. */
 		radius = fmax(0, fmin(a * 0.8, a - 1));
-		cairo_move_to(cr, ex, cy);
-		cairo_line_to(cr, cx + sx*radius, cy);
+		vec_move_to(cr, ex, cy);
+		vec_line_to(cr, cx + sx*radius, cy);
 		/* True tangent quarter-circle approximation, not a bevel. */
 		a = 0.5522847498307936;
-		cairo_curve_to(cr, cx+sx*radius*(1-a), cy,
+		vec_curve_to(cr, cx+sx*radius*(1-a), cy,
 		               cx, cy+sy*radius*(1-a), cx, cy+sy*radius);
-		cairo_line_to(cr, cx, ey);
-		cairo_stroke(cr);
+		vec_line_to(cr, cx, ey);
+		vec_stroke(cr);
 		return;
 	}
 	if (u >= 0x1cc1b && u <= 0x1cc1e) {
 		if (u <= 0x1cc1c) {
-			cairo_rectangle(cr, 0, cy-s/2, w, s);
-			cairo_rectangle(cr, w-s, u == 0x1cc1b ? 0 : cy-s/2,
+			vec_rectangle(cr, 0, cy-s/2, w, s);
+			vec_rectangle(cr, w-s, u == 0x1cc1b ? 0 : cy-s/2,
 			                s, u == 0x1cc1b ? cy+s/2 : h-cy+s/2);
 		} else {
-			cairo_rectangle(cr, 0, u == 0x1cc1d ? 0 : h-s, w, s);
-			cairo_rectangle(cr, 0, u == 0x1cc1d ? 0 : cy-s/2,
+			vec_rectangle(cr, 0, u == 0x1cc1d ? 0 : h-s, w, s);
+			vec_rectangle(cr, 0, u == 0x1cc1d ? 0 : cy-s/2,
 			                s, u == 0x1cc1d ? cy+s/2 : h-cy+s/2);
 		}
-		cairo_fill(cr);
+		vec_fill(cr);
 		return;
 	}
 	if (u >= 0x1ce16 && u <= 0x1ce19) {
 		int right = u <= 0x1ce17, bottom = u & 1;
-		cairo_rectangle(cr, cx-s/2, 0, s, h);
-		cairo_rectangle(cr, right ? cx-s/2 : 0, bottom ? h-s : 0,
+		vec_rectangle(cr, cx-s/2, 0, s, h);
+		vec_rectangle(cr, right ? cx-s/2 : 0, bottom ? h-s : 0,
 		                right ? w-cx+s/2 : cx+s/2, s);
-		cairo_fill(cr);
+		vec_fill(cr);
 		return;
 	}
 	if (u == 0x1fbaf) {
-		cairo_rectangle(cr, 0, cy-s/2, w, s);
-		cairo_rectangle(cr, cx-s/2, floor(h/4.0), s, ceil(3*h/4.0)-floor(h/4.0));
-		cairo_fill(cr);
+		vec_rectangle(cr, 0, cy-s/2, w, s);
+		vec_rectangle(cr, cx-s/2, floor(h/4.0), s, ceil(3*h/4.0)-floor(h/4.0));
+		vec_fill(cr);
 		return;
 	}
 	for (i = 0; i < 9; ++i) {
@@ -156,10 +156,10 @@ drawboxlinesextra(cairo_t *cr, int w, int h, Rune u, int bold)
 		mask = diamond[u-0x1fba0];
 		/* Square caps cover shared edge vertices without round bulges;
 		 * all subpaths are stroked together, avoiding alpha seams. */
-		cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
+		vec_set_line_cap(cr, VEC_LINE_CAP_SQUARE);
 		for (i = 0; i < 4; ++i) if (mask & (1 << i)) {
-			cairo_move_to(cr, xx[edges[i][0]], yy[edges[i][0]]);
-			cairo_line_to(cr, xx[edges[i][1]], yy[edges[i][1]]);
+			vec_move_to(cr, xx[edges[i][0]], yy[edges[i][0]]);
+			vec_line_to(cr, xx[edges[i][1]], yy[edges[i][1]]);
 		}
 	} else {
 		n = 2;
@@ -179,7 +179,7 @@ drawboxlinesextra(cairo_t *cr, int w, int h, Rune u, int bold)
 		/* Two rails, one stem of clear space. Clamp for tiny cells. */
 		a = fmin(s, m/4.0);
 		if (doubled) {
-			cairo_set_line_width(cr, fmin(s, m/4.0));
+			vec_set_line_width(cr, fmin(s, m/4.0));
 			boxextra_poly(cr, x, y, n, a, w+h+2*s);
 			boxextra_poly(cr, x, y, n, -a, w+h+2*s);
 		} else {
@@ -190,5 +190,5 @@ drawboxlinesextra(cairo_t *cr, int w, int h, Rune u, int bold)
 			}
 		}
 	}
-	cairo_stroke(cr);
+	vec_stroke(cr);
 }

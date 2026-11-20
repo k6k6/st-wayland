@@ -1,42 +1,20 @@
-/* Validate native-size borrowing and scaled rebuilds using real SIXEL input. */
+/* Real SIXEL parsing, borrowed native pixels, filtered resize and composition. */
 #define main st_program_main
 #include "../wl.c"
 #undef main
 #include <assert.h>
 
 #if SIXEL_PATCH
-static cairo_surface_t *reference(const ImageList *im, int w, int h)
+static uint32_t pixel(pixman_image_t *image, int x, int y)
 {
-	cairo_surface_t *src = cairo_image_surface_create_for_data(im->pixels,
-		CAIRO_FORMAT_ARGB32, im->width, im->height, im->width * 4);
-	cairo_surface_t *dst = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-	cairo_t *cr = cairo_create(dst);
-	cairo_scale(cr, (double)w / im->width, (double)h / im->height);
-	cairo_set_source_surface(cr, src, 0, 0);
-	cairo_pattern_set_filter(cairo_get_source(cr), w == im->width && h == im->height ?
-		CAIRO_FILTER_NEAREST : CAIRO_FILTER_GOOD);
-	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE); cairo_paint(cr);
-	assert(cairo_status(cr) == CAIRO_STATUS_SUCCESS);
-	cairo_destroy(cr); cairo_surface_destroy(src);
-	return dst;
-}
-
-static void samepixels(cairo_surface_t *a, cairo_surface_t *b)
-{
-	assert(cairo_image_surface_get_width(a) == cairo_image_surface_get_width(b));
-	assert(cairo_image_surface_get_height(a) == cairo_image_surface_get_height(b));
-	cairo_surface_flush(a); cairo_surface_flush(b);
-	for (int y = 0; y < cairo_image_surface_get_height(a); y++)
-		assert(!memcmp(cairo_image_surface_get_data(a) + y * cairo_image_surface_get_stride(a),
-		               cairo_image_surface_get_data(b) + y * cairo_image_surface_get_stride(b),
-		               cairo_image_surface_get_width(a) * 4));
+	return *(uint32_t *)((unsigned char *)pixman_image_get_data(image) +
+		y * pixman_image_get_stride(image) + x * 4);
 }
 
 static ImageList *parse(int transparent)
 {
 	sixel_state_t state = {0};
 	ImageList *list;
-	/* 12x12 with both painted and unpainted pixels, split into cell-height strips. */
 	const unsigned char input[] = "\"1;1;12;12#1;2;100;0;0!6~-#2;2;0;100;0!12C\033\\";
 	assert(sixel_parser_init(&state, transparent, 0xffffffff,
 	                        transparent ? 0 : 0xff224466, 1, 4, 4) == 0);
@@ -46,7 +24,7 @@ static ImageList *parse(int transparent)
 	return list;
 }
 
-static void surfaces(int transparent)
+static void images(int transparent)
 {
 	term.images = parse(transparent);
 	for (ImageList *im = term.images; im; im = im->next) {
@@ -54,25 +32,50 @@ static void surfaces(int transparent)
 		size_t bytes = (size_t)im->width * im->height * 4;
 		unsigned char *saved = xmalloc(bytes); memcpy(saved, original, bytes);
 		for (int cycle = 0; cycle < 18; cycle++) {
-			int w = cycle % 3 == 1 ? im->width * 3 / 2 : im->width;
-			int h = cycle % 3 == 1 ? im->height * 3 / 2 : im->height;
+			int w = cycle % 3 == 1 ? im->width * 3 / 2 : cycle % 3 == 2 ? im->width / 2 : im->width;
+			int h = cycle % 3 == 1 ? im->height * 3 / 2 : cycle % 3 == 2 ? im->height / 2 : im->height;
 			im->pixmap = sixelsurface(im, w, h); assert(im->pixmap);
-			cairo_surface_t *ref = reference(im, w, h);
-			samepixels(im->pixmap, ref);
-			if (w == im->width && h == im->height)
-				assert(cairo_image_surface_get_data(im->pixmap) == original);
-			else assert(cairo_image_surface_get_data(im->pixmap) != original);
+			assert(pixman_image_get_width(im->pixmap) == w && pixman_image_get_height(im->pixmap) == h);
+			if (w == im->width && h == im->height) {
+				assert((unsigned char *)pixman_image_get_data(im->pixmap) == original);
+				for (int y = 0; y < h; y++) for (int x = 0; x < w; x++)
+					assert(pixel(im->pixmap, x, y) == ((uint32_t *)original)[y*w+x]);
+			} else {
+				assert((unsigned char *)pixman_image_get_data(im->pixmap) != original);
+				/* Premultiplied colors remain valid after convolution. */
+				for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+					uint32_t p = pixel(im->pixmap,x,y), a = p >> 24;
+					assert(((p >> 16) & 255) <= a && ((p >> 8) & 255) <= a && (p & 255) <= a);
+				}
+			}
 			assert(!memcmp(original, saved, bytes));
-			cairo_surface_destroy(ref);
-			cairo_surface_destroy(im->pixmap); im->pixmap = NULL;
+			pixman_image_unref(im->pixmap); im->pixmap = NULL;
 		}
 		free(saved);
 		im->pixmap = sixelsurface(im, im->width, im->height);
 	}
-	/* Deleting first/middle/last must respect list links and wrapper lifetime. */
 	delete_image(term.images->next);
 	while (term.images) delete_image(term.images);
 	assert(!term.images);
+}
+
+static void downsampling(void)
+{
+	uint32_t pixels[64*64];
+	ImageList im = {.pixels = (unsigned char *)pixels, .width = 64, .height = 64};
+	/* One white column in every eight must contribute 1/8 intensity. At this
+	 * scale nearest/bilinear sampling hits only black columns and loses it. */
+	for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++)
+		pixels[y*64+x] = x % 8 == 0 ? 0xffffffff : 0xff000000;
+	pixman_image_t *small = sixelsurface(&im, 8, 8); assert(small);
+	for (int y = 1; y < 7; y++) for (int x = 1; x < 7; x++) {
+		uint32_t p = pixel(small,x,y);
+		assert((p>>24) == 255);
+		assert((p&255) >= 31 && (p&255) <= 33);
+		assert(((p>>8)&255) == (p&255) && ((p>>16)&255) == (p&255));
+	}
+	pixman_image_unref(small);
+	assert(!sixelsurface(&im,0,8));
 }
 
 static void erasure(void)
@@ -86,26 +89,32 @@ static void erasure(void)
 	borderpx = 0;
 	#endif
 	for (int transparent = 0; transparent <= 1; transparent++) {
-		for (int y = 0; y < 3; y++) for (int x = 0; x < 4; x++)
-			cells[y][x].mode = ATTR_SIXEL;
+		const uint32_t background = 0xff8899aau;
+		for (int y = 0; y < 3; y++) for (int x = 0; x < 4; x++) cells[y][x].mode = ATTR_SIXEL;
 		term.images = parse(transparent);
-		xw.buf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 16, 12);
-		xw.draw = cairo_create(xw.buf); resetdrawstate();
-		/* No curbuf: present() is a no-op, but image clipping/deletion is real. */
+		xw.pix = pixman_image_create_bits(PIXMAN_a8r8g8b8,16,12,NULL,0); assert(xw.pix);
+		xw.draw = vec_create(xw.pix); assert(xw.draw);
+		for (int i = 0; i < 16*12; i++) pixman_image_get_data(xw.pix)[i] = background;
+		/* Erase middle cell in every strip: its pixels must be left alone. */
+		for (int y = 0; y < 3; y++) cells[y][1].mode = 0;
 		xfinishdraw();
 		for (ImageList *im = term.images; im; im = im->next) {
-			assert(im->pixmap);
-			assert(cairo_image_surface_get_data(im->pixmap) == im->pixels);
+			assert(im->pixmap && (unsigned char *)pixman_image_get_data(im->pixmap) == im->pixels);
+			for (int y = 0; y < im->height; y++) for (int x = 0; x < im->width; x++) {
+				uint32_t source = ((uint32_t *)im->pixels)[y*im->width+x];
+				uint32_t want = x/4 == 1 || (transparent && !source) ? background : source;
+				assert(pixel(xw.pix,x,im->y*4+y) == want);
+			}
 		}
-		/* History hides a strip without deleting its original or cache. */
+		for (int y = 0; y < 12; y++) for (int x = 12; x < 16; x++) assert(pixel(xw.pix,x,y) == background);
 		term.images->y = -1;
-		void *cache = term.images->pixmap;
+		pixman_image_t *cache = term.images->pixmap;
 		xfinishdraw(); assert(term.images->pixmap == cache);
 		term.images->y = 0;
 		for (int y = 0; y < 3; y++) for (int x = 0; x < 4; x++) cells[y][x].mode = 0;
 		xfinishdraw(); assert(!term.images);
-		cairo_destroy(xw.draw); cairo_surface_destroy(xw.buf);
-		xw.draw = NULL; xw.buf = NULL;
+		vec_destroy(xw.draw); pixman_image_unref(xw.pix);
+		xw.draw = NULL; xw.pix = NULL;
 	}
 }
 #endif
@@ -113,9 +122,9 @@ static void erasure(void)
 int main(void)
 {
 	#if SIXEL_PATCH
-	surfaces(0); surfaces(1); erasure();
-	puts("PASS: real SIXEL parsing, native pixel sharing, exact scaled/reloaded pixels, "
-	     "transparent/opaque, hidden strips, erasure and deletion");
+	images(0); images(1); downsampling(); erasure();
+	puts("PASS: real SIXEL parsing, exact native pixels, borrowed storage, filtered shrink/enlarge, "
+	     "premultiplied alpha, transparent/opaque cell clipping, hidden strips and deletion");
 	#else
 	puts("PASS: SIXEL disabled build");
 	#endif

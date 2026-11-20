@@ -11,7 +11,7 @@ mkdir "$work/tools"
 cp "$root/tools/fullscreen_alpha_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 cflags=${CFLAGS:--O1 -g}
 ldflags=${LDFLAGS:-}
 for variant in alpha focus selection focus-selection gradient focus-selection-gradient disabled; do
@@ -44,8 +44,8 @@ PY
 	# Exclude wl.o: the test includes the real wl.c with its main renamed.
 	${CC:-cc} $cflags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/fullscreen_alpha_test.c \
-		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
-		$ldflags $(pkg-config --libs $packages) -lm -lutil -lrt -o fullscreen-alpha-test
+		st.o patch/vec.o sixel.o sixel_hls.o protocols/*.o \
+		$ldflags $(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o fullscreen-alpha-test
 	printf '%s: ' "$variant"
 	./fullscreen-alpha-test
 done

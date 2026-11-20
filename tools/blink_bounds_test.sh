@@ -17,7 +17,7 @@ p.write_text(s)
 PY
     rm -f "$work/st.o"
     make -s -C "$work" st.o CFLAGS="${CFLAGS:--O1 -g} -ffunction-sections -fdata-sections"
-    ${CC:-cc} ${CFLAGS:--O1 -g} $(pkg-config --cflags cairo) -I"$work" "$root/tools/blink_bounds_test.c" \
+    ${CC:-cc} ${CFLAGS:--O1 -g} $(pkg-config --cflags pixman-1) -I"$work" "$root/tools/blink_bounds_test.c" \
         "$work/st.o" -Wl,--gc-sections ${LDFLAGS:-} -o "$work/test"
     printf 'REFLOW_PATCH=%s: ' "$reflow"
     "$work/test"

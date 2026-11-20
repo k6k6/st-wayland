@@ -3,14 +3,14 @@
  * MIT/X Consortium License
  */
 
-#include <cairo.h>
+#include "vec.h"
 #include "powerline.c"
 #include "boxextra.c"
 
 /* Rounded non-negative integers division of n / d  */
 #define DIV(n, d) (((n) + (d) / 2) / (d))
 
-static cairo_t *bdcr;
+static VecContext *bdcr;
 
 static void drawbox(int, int, int, int, Color *, Color *, ushort);
 static void drawboxlines(int, int, int, int, Color *, ushort);
@@ -21,14 +21,14 @@ bdrect(Color *c, int x, int y, int w, int h)
 {
 	if (w <= 0 || h <= 0)
 		return;
-	/* direct pixel writes, much cheaper than going through cairo */
+	/* Rectangles need only direct pixel writes. */
 	wlfillrect(c, x, y, w, h);
 }
 
 /* public API */
 
 void
-boxdraw_xinit(cairo_t *cr)
+boxdraw_xinit(VecContext *cr)
 {
 	bdcr = cr;
 }

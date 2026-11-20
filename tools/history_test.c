@@ -3,7 +3,95 @@
 #define _GNU_SOURCE
 #include <locale.h>
 #include <assert.h>
+#include <stdlib.h>
+#include <stdint.h>
+#ifdef HISTORY_ALLOCATIONS
+static void *history_malloc(size_t);
+static void *history_realloc(void *, size_t);
+static void history_free(void *);
+#define malloc history_malloc
+#define realloc history_realloc
+#define free history_free
+#endif
 #include "../st.c"
+#ifdef HISTORY_ALLOCATIONS
+#undef malloc
+#undef realloc
+#undef free
+
+/* Track parser-owned allocations without changing production code. The same
+ * instrumentation runs against the frozen reference; CPU timings use a
+ * separate build without these wrappers. */
+static struct {
+	void *ptr;
+	size_t bytes;
+} allocations[32768];
+static size_t allocated, allocation_peak;
+
+static size_t allocationslot(void *ptr, int insert)
+{
+	size_t slot = ((uintptr_t)ptr >> 4) * 2654435761u % LEN(allocations);
+	size_t vacant = LEN(allocations);
+	for (size_t i = 0; i < LEN(allocations); i++) {
+		void *found = allocations[slot].ptr;
+		if (found == ptr)
+			return slot;
+		if (found == (void *)(uintptr_t)1 && vacant == LEN(allocations))
+			vacant = slot;
+		if (!found)
+			return insert ? (vacant < LEN(allocations) ? vacant : slot) : LEN(allocations);
+		slot = (slot + 1) % LEN(allocations);
+	}
+	if (!insert)
+		return LEN(allocations);
+	assert(vacant < LEN(allocations));
+	return vacant;
+}
+
+static void allocationremove(void *ptr)
+{
+	if (!ptr) return;
+	size_t slot = allocationslot(ptr, 0);
+	if (slot == LEN(allocations)) return; /* e.g. an external strdup */
+	allocated -= allocations[slot].bytes;
+	allocations[slot].ptr = (void *)(uintptr_t)1;
+}
+
+static void allocationadd(void *ptr, size_t bytes)
+{
+	if (!ptr) return;
+	size_t slot = allocationslot(ptr, 1);
+	allocations[slot].ptr = ptr;
+	allocations[slot].bytes = bytes;
+	allocated += bytes;
+	allocation_peak = MAX(allocation_peak, allocated);
+}
+
+static void *history_malloc(size_t bytes)
+{
+	void *ptr = malloc(bytes);
+	allocationadd(ptr, bytes);
+	return ptr;
+}
+
+static void *history_realloc(void *ptr, size_t bytes)
+{
+	allocationremove(ptr);
+	void *next = realloc(ptr, bytes);
+	assert(next || !bytes);
+	allocationadd(next, bytes);
+	return next;
+}
+
+static void history_free(void *ptr)
+{
+	allocationremove(ptr);
+	free(ptr);
+}
+#define malloc history_malloc
+#define realloc history_realloc
+#define free history_free
+#endif
 
 static unsigned int seed = 20261119;
 static unsigned int rnd(unsigned int n)
@@ -144,6 +232,149 @@ static void images(void)
 #endif
 }
 
+static size_t historybytes(void)
+{
+	size_t bytes = 0;
+	for (int i = 0; i < HISTSIZE; i++)
+		bytes += abs(term.histlen[i]) * sizeof(Glyph);
+	return bytes;
+}
+
+/* Read operations must preserve the packed allocation and the actual cells.
+ * Semantic digests are also compared with a frozen, unmodified implementation
+ * when HISTORY_TEST_REFERENCE is supplied to the driver. */
+static void readscans(void)
+{
+	feed("\033[?1049l\033[r\033[2J\033[H\033[3J");
+	tresize(209, 12);
+	for (int i = 0; i < HISTSIZE + 20; i++)
+		feed("%04d: history \xe4\xb8\xad beta\r\n", i);
+	compact();
+	for (int type = SEL_REGULAR; type <= SEL_RECTANGULAR; type++) {
+		selstart(type == SEL_REGULAR ? 0 : 7, -term.histf, 0);
+		selextend(type == SEL_REGULAR ? term.col-1 : 22, term.row-1, type, 0);
+		compact();
+		size_t before = historybytes();
+		char *text = getsel();
+		assert(text && strlen(text) > 10000);
+		digest = 1469598103934665603ull;
+		for (unsigned char *p = (unsigned char *)text; *p; p++) hash(*p);
+		printf("copy %d %zu %016llx\n", type, strlen(text), (unsigned long long)digest);
+		free(text);
+		#ifdef HISTORY_READVIEW
+		assert(historybytes() == before);
+		#endif
+		fprintf(stderr, "copy type=%d history-bytes=%zu -> %zu\n", type, before, historybytes());
+		compact(); selclear();
+	}
+	#if KEYBOARDSELECT_PATCH
+	win.mode ^= kbds_keyboardhandler(-1, NULL, 0, 0);
+	static const char *queries[] = {"absent_XYZ", "history", "\xe4\xb8\xad", "absent_XYZ"};
+	for (size_t q = 0; q < LEN(queries); q++) {
+		compact();
+		size_t before = historybytes();
+		kbds_keyboardhandler(XKB_KEY_slash, NULL, 0, 0);
+		#ifdef HISTORY_READVIEW
+		assert(historybytes() == before); /* clearing highlights stays packed */
+		#endif
+		kbds_pasteintosearch(queries[q], strlen(queries[q]), 0);
+		kbds_keyboardhandler(XKB_KEY_Return, NULL, 0, 0);
+		#ifdef HISTORY_READVIEW
+		/* Only the destination cursor/visible rows may require expansion. */
+		assert(historybytes() <= before + (term.row + 2) * term.col * sizeof(Glyph));
+		#endif
+		fprintf(stderr, "search query=%zu history-bytes=%zu -> %zu\n", q, before, historybytes());
+		printf("search %zu pos=%d,%d scroll=%d\n", q, kbds_c.x, kbds_c.y, term.scr);
+		compact(); state(4100 + q);
+		for (int dir = -1; dir <= 1; dir += 2) {
+			kbds_quant = 3;
+			kbds_searchnext(dir);
+			printf("next %zu dir=%d pos=%d,%d scroll=%d\n", q, dir, kbds_c.x, kbds_c.y, term.scr);
+			compact(); state(4120 + 2 * q + (dir > 0));
+		}
+	}
+	win.mode ^= kbds_keyboardhandler(XKB_KEY_Escape, NULL, 0, 1);
+	compact(); state(4140);
+
+	/* Repeated meaningful cells can occupy a logical full-width tail.
+	 * Highlighting only part of it must split the tail, never mark all copies. */
+	feed("\033[r\033[2J\033[H\033[3J");
+	tresize(17, 5);
+	for (int i = 0; i < 25; i++) {
+		feed("xxxxxxxxxxxxxxxxx\r\n");
+		feed("                 \r\n");
+		feed("abcdefghijklmno\xe4\xb8\xad" "pqr\xe4\xb8\xad" "STuv\r\n");
+		feed("abcdefghijklmnopqxxxxxxxxxxxxxxxxx\r\n");
+	}
+	compact();
+	static const char *edgequeries[] = {"qxxx", "xxx", "   ", "\xe4\xb8\xad" "pqr", "o\xe4\xb8\xad", "STu", "uV"};
+	win.mode ^= kbds_keyboardhandler(-1, NULL, 0, 0);
+	for (size_t q = 0; q < LEN(edgequeries); q++) {
+		kbds_keyboardhandler(XKB_KEY_slash, NULL, 0, 0);
+		kbds_pasteintosearch(edgequeries[q], strlen(edgequeries[q]), 0);
+		kbds_keyboardhandler(XKB_KEY_Return, NULL, 0, 0);
+		printf("edge %zu pos=%d,%d scroll=%d\n", q, kbds_c.x, kbds_c.y, term.scr);
+		compact(); state(4160 + q);
+		kbds_quant = 2; kbds_searchnext(-1);
+		printf("edge-back %zu pos=%d,%d scroll=%d\n", q, kbds_c.x, kbds_c.y, term.scr);
+		compact(); state(4180 + q);
+	}
+	win.mode ^= kbds_keyboardhandler(XKB_KEY_Escape, NULL, 0, 1);
+	compact(); state(4200);
+	/* Alternate-screen line ending uses spaces, not ATTR_SET. */
+	feed("\033[?1049h\033[2J\033[Hxxx xxx  \r\n\xe4\xb8\xad" "pqr STuv");
+	win.mode ^= kbds_keyboardhandler(-1, NULL, 0, 0);
+	kbds_keyboardhandler(XKB_KEY_slash, NULL, 0, 0);
+	kbds_pasteintosearch("xxx", 3, 0);
+	kbds_keyboardhandler(XKB_KEY_Return, NULL, 0, 0);
+	state(4220);
+	win.mode ^= kbds_keyboardhandler(XKB_KEY_Escape, NULL, 0, 1);
+	feed("\033[?1049l");
+	#endif
+}
+
+static void reflowmemory(void)
+{
+	feed("\033[?1049l\033[r\033[2J\033[H\033[3J");
+	tresize(160, 45);
+	for (int i = 0; i < HISTSIZE + 50; i++)
+		feed("%04d short \xe4\xb8\xad log\r\n", i);
+	compact();
+	const int widths[] = {80, 320, 41, 209, 160};
+	for (size_t i = 0; i < LEN(widths); i++) {
+		#ifdef HISTORY_ALLOCATIONS
+		size_t before = allocated;
+		allocation_peak = allocated;
+		#endif
+		tresize(widths[i], 45);
+		#ifdef HISTORY_ALLOCATIONS
+		fprintf(stderr, "reflow col=%d live=%zu peak=%zu extra=%zu\n",
+		        widths[i], allocated, allocation_peak, allocation_peak - before);
+		#ifdef HISTORY_REFLOW_COMPACT
+		/* A full history of short rows must no longer coexist as two
+		 * expanded grids during width changes. */
+		assert(allocation_peak - before < HISTSIZE * 80 * sizeof(Glyph) / 2);
+		#endif
+		#endif
+		state(4300 + i);
+	}
+	/* Fill the ring with wrapped lines, meaningful repeated tails and wide
+	 * boundaries, then discard more than HISTSIZE rows during narrow reflow. */
+	feed("\033[r\033[2J\033[H\033[3J");
+	tresize(41, 9);
+	for (int i = 0; i < HISTSIZE + 15; i++) {
+		feed("%04d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", i);
+		feed("\xe4\xb8\xad\xe4\xb8\xad qqqqqqqqqqqqqqqqqqqqqqqqqq\r\n");
+	}
+	compact();
+	kscrollup(&(Arg){.i = 17});
+	const int narrow[] = {2, 3, 83, 209, 41};
+	for (size_t i = 0; i < LEN(narrow); i++) {
+		tresize(narrow[i], 4 + i);
+		state(4320 + i);
+	}
+}
+
 int main(void)
 {
 	setlocale(LC_CTYPE, "");
@@ -212,6 +443,8 @@ int main(void)
 	for (int i = 0; i < HISTSIZE; i++) after += abs(term.histlen[i]) * sizeof(Glyph);
 	assert(after == bytes);
 #endif
+	readscans();
+	reflowmemory();
 	puts("PASS: history cells, wraps, styles, SIXEL, selection, scrolling, resize and reflow");
 	return 0;
 }

@@ -1,5 +1,13 @@
 # st X11 → Wayland 迁移总结
 
+> **当前渲染路径（2026-11-20，M4–M6）**：文本使用 fcft，矢量使用 FreeType
+> Outline/Stroker，合成与 SIXEL 使用 pixman，直接写入 wl_shm。Cursor trail 使用 pixman 三角形。
+> 已删除 Cairo 后端、临时 `PIXMAN_FCFT_PATCH`、`hb.c/hb.h` 与旧字体回退实现。
+> 构建需要 fcft（开启连字时须支持 text-run shaping）、pixman、FreeType、Fontconfig、
+> Wayland client/cursor/protocols 与 xkbcommon；HarfBuzz 由 fcft 使用，不再由 st 直接链接。
+> 阶段验收、外观差异和性能记录见 [PIXMAN-FCFT-MIGRATION.md](PIXMAN-FCFT-MIGRATION.md)。
+> 下文 X11 → Wayland 的原始迁移和历史问题记录保留其当时的实现描述。
+
 > 日期：2026-09-21 ｜ 环境：Hyprland 0.52.2（`XDG_SESSION_TYPE=wayland`，monitor scale=1）
 > wayland 1.26.0 / wayland-protocols 1.49 / xkbcommon 1.13.2 / cairo 1.18.4（含 cairo-ft）/
 > freetype 26.6.20 / fontconfig 2.18.3 / harfbuzz 14.4.0 / imlib2 1.12.7 / gdlib 2.3.3
@@ -140,7 +148,7 @@ static int cursortrailthreshold = 2;          /* 横向或纵向至少移动多�
   这样重新显示光标的那一帧仍能从那一段距离动画过来。
 - 动画复用 `wl_surface.frame` 节流，静止后不再唤醒；同步更新期间保持原有绘制暂停。
   每帧重绘上一尾迹覆盖的终端行，恢复连字、文本和 sixel，不留下残影。
-- 绘制使用 Cairo 抗锯齿，保留 st 的触发阈值、换屏和隐藏帧策略；没有移植 kitty 的
+- 绘制使用 pixman 三角形覆盖蒙版，保留 st 的触发阈值、换屏和隐藏帧策略；没有移植 kitty 的
   DECTCEM 透明度渐变、目标接纳延时或自定义 shader 的火焰／运动模糊。
 
 运行 `make && ./st` 试用本地构建；已有窗口需要重新启动。
@@ -151,7 +159,7 @@ static int cursortrailthreshold = 2;          /* 横向或纵向至少移动多�
 
 ### FONT2_PATCH：备用字体
 
-Wayland 后端已支持 `FONT2_PATCH`，使用 Fontconfig + Cairo，不再依赖 Xft。
+Wayland 后端的 `FONT2_PATCH` 把字体列表交给 fcft 管理。
 启用时将 `patches.h` 中的 `FONT2_PATCH` 设为 `1`（如需新配置也默认启用，同步修改
 `patches.def.h`），然后在 `config.h` 的 `font2[]` 中按优先级配置字体，例如：
 
@@ -163,7 +171,7 @@ static char *font2[] = {
 ```
 
 - 主字体已有的字形不受影响；缺字时按 `font2[]` 顺序查找，均缺字才进入自动字体回退。
-- 每个备用字体预加载 normal / italic / bold-italic / bold 四种样式；空列表也可正常使用。
+- 四种样式分别保留备用字体顺序，fcft 按需打开回退字体；空列表也可正常使用。
 - `size` 为点数（默认 DPI 为 96，也可指定 `dpi`），`pixelsize` 为逻辑像素；未指定大小时为 12 点。
   字体随终端 zoom 和 Wayland 整数/分数缩放重载，保留备用字体与主字体的大小比例。
 - 字体名使用 Fontconfig 格式，不支持 X11 XLFD 格式；请用 `fc-match '字体名'` 检查实际匹配结果。
@@ -213,7 +221,7 @@ Wayland 缩放改变后直接使用新的 cell 尺寸；实心图形不随 bold/
 有间断；内建绘制并不意味着任意字符组合都能组成无缝图案。
 
 实现分为 `patch/boxlines_extra.c`、`patch/boxblocks_extra.c`、`patch/boxcircles.c`、
-`patch/boxmosaics.c`、`patch/boxbranch.c`，由 `patch/boxextra.c` 统一管理裁剪和 Cairo
+`patch/boxmosaics.c`、`patch/boxbranch.c`，由 `patch/boxextra.c` 与 `patch/vec.c` 统一管理裁剪和矢量
 状态。`BDX` 编码以 12 位（4 位页号 + 8 位码点）保存 Unicode
 页号及页内码点，在原有 16 位 boxdraw 接口中保留补充平面字符，不截断成低字节。
 普通 ASCII 文本在扩展几何判定入口快速排除；没有新增库依赖或常驻字形缓存。
@@ -231,7 +239,8 @@ branch 开关、完整 Unicode 码点路由、像素边界、字形语义、缩�
 
 ### 已修复（2026-10-16）
 - **yazi 里快速按 `j` 滚动时 segfault**（崩溃在 `hb_shape_plan_create_cached2` 内）：`hb.c` 的 `hbfontcache` 用 `hb_ft_font_create()` 建 hb_font，不持有 FT_Face 的生命周期，而该 face 属于 cairo 的 unscaled font——cairo 在同时打开超过 `MAX_OPEN_FACES`(10) 个 face 时会 `FT_Done_Face()` 掉空闲 face（`cairo-ft-font.c` 的 `_cairo_ft_unscaled_font_lock_face` 随机挑一个 `lock_count == 0` 的），全屏重绘不断引入回退字体时很容易越过这个上限。HarfBuzz 的 table 指针直接指向 FreeType 为该 face 建的 mmap（`ft_face->stream->read == NULL` 时 `hb_ft_face_create()` 走零拷贝，blob 的 data 就是 `stream->base`），face 一关，映射释放，再被别的字体文件映射到同一地址后整形就读到垃圾 table 数据（GSUB 段读到 cour.ttf 的 `loca` 内容，`featureVariations` 偏移成野指针）而崩溃。修复：改用 `hb_ft_font_create_referenced()`，hb_font 自带引用，`hbunloadfonts()` 销毁字体时释放。
-  无显示服务器回归测试：`tools/hb_face_lifetime_test.sh`。它确定性触发 cairo 的 face 回收（锁住其它 face，让主字体 face 成为唯一空闲候选），再断言主字体 face 与字体文件映射仍然有效、缓存字体整形结果与新建字体一致，最后跑一轮回退字体抖动。嵌套无头 Hyprland（`WLR_BACKENDS=headless`）里 `st -e yazi /usr/share/applications` + `wtype -d 6` 连按 `j`：修复前稳定 SIGSEGV，修复后不再复现。
+  历史回归测试 `tools/hb_face_lifetime_test.sh` 已随 M6 删除，当前由 fcft 持有字体；
+  连字缓存和字体重建覆盖见 `tools/textrun_test.sh`、`tools/font2_test.sh`。原测试确定性触发 cairo 的 face 回收（锁住其它 face，让主字体 face 成为唯一空闲候选），再断言主字体 face 与字体文件映射仍然有效、缓存字体整形结果与新建字体一致，最后跑一轮回退字体抖动。嵌套无头 Hyprland（`WLR_BACKENDS=headless`）里 `st -e yazi /usr/share/applications` + `wtype -d 6` 连按 `j`：修复前稳定 SIGSEGV，修复后不再复现。
 
 ### 内存优化（2026-09-21 晚）
 对比 foot 的 `smaps_rollup`，差距主要在 Anonymous（堆）与 libgd 拖入的共享库。已做：

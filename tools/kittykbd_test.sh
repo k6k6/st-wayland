@@ -11,7 +11,7 @@ mkdir "$work/tools"
 cp "$root/tools/kittykbd_test.c" "$work/tools/"
 cd "$work"
 cp patches.h patches.test-base.h
-packages='wayland-client wayland-cursor xkbcommon cairo cairo-ft fontconfig freetype2 harfbuzz'
+packages='wayland-client wayland-cursor xkbcommon fontconfig freetype2 pixman-1'
 cflags=${CFLAGS:--O1 -g}
 ldflags=${LDFLAGS:-}
 for variant in fixkbd nofixkbd disabled; do
@@ -37,8 +37,8 @@ PY
 	fi
 	${CC:-cc} $cflags -DVERSION=\"test\" -Iprotocols \
 		$(pkg-config --cflags $packages) tools/kittykbd_test.c \
-		st.o hb.o sixel.o sixel_hls.o protocols/*.o \
-		$ldflags $(pkg-config --libs $packages) -lm -lutil -lrt -o kittykbd-test
+		st.o patch/vec.o sixel.o sixel_hls.o protocols/*.o \
+		$ldflags $(pkg-config --libs $packages) -lfcft -lm -lutil -lrt -o kittykbd-test
 	printf '%s: ' "$variant"
 	./kittykbd-test
 done

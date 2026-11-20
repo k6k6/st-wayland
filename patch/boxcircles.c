@@ -1,6 +1,6 @@
-/* Geometric circles, included by boxdraw.c (Rune and Cairo already declared).
+/* Geometric circles, included by boxdraw.c (Rune and vector already declared).
  * No font lookup and no background painting. The caller supplies an integer
- * cell clip, local origin, foreground source, and saves/restores Cairo state.
+ * cell clip, local origin, foreground source, and saves/restores vector state.
  * References (geometry, not copied implementation): Unicode U25A0/U1CC00/
  * U1FB00 charts; ghostty src/font/sprite/draw/
  * symbols_for_legacy_computing{,_supplement}.zig, circle/circlePiece.
@@ -24,34 +24,34 @@ isboxcircle(Rune u)
 	       (u >= 0x1fbe8 && u <= 0x1fbef);
 }
 
-/* Angles in quarter turns, clockwise in Cairo's downward Y coordinates.
+/* Angles in quarter turns, clockwise in vector's downward Y coordinates.
  * Restore the CTM before stroking, so ellipses retain uniform line weight. */
 static void
-boxcirclearc(cairo_t *cr, double x, double y, double rx, double ry,
+boxcirclearc(VecContext *cr, double x, double y, double rx, double ry,
              double a, double b)
 {
 	const double halfpi = 1.57079632679489661923;
-	cairo_save(cr);
-	cairo_translate(cr, x, y);
-	cairo_scale(cr, rx, ry);
-	cairo_arc(cr, 0, 0, 1, a * halfpi, b * halfpi);
-	cairo_restore(cr);
+	vec_save(cr);
+	vec_translate(cr, x, y);
+	vec_scale(cr, rx, ry);
+	vec_arc(cr, 0, 0, 1, a * halfpi, b * halfpi);
+	vec_restore(cr);
 }
 
 static void
-boxcircledisk(cairo_t *cr, double x, double y, double rx, double ry, int filled)
+boxcircledisk(VecContext *cr, double x, double y, double rx, double ry, int filled)
 {
-	cairo_new_sub_path(cr);
+	vec_new_sub_path(cr);
 	boxcirclearc(cr, x, y, rx, ry, 0, 4);
-	cairo_close_path(cr);
+	vec_close_path(cr);
 	if (filled)
-		cairo_fill(cr);
+		vec_fill(cr);
 	else
-		cairo_stroke(cr);
+		vec_stroke(cr);
 }
 
 static void
-drawboxcircle(cairo_t *cr, int w, int h, Rune u)
+drawboxcircle(VecContext *cr, int w, int h, Rune u)
 {
 	double d, t, r, rx, ry, x, y, a = 0, b = 4;
 	int n, filled = 0;
@@ -59,17 +59,17 @@ drawboxcircle(cairo_t *cr, int w, int h, Rune u)
 	if (w <= 0 || h <= 0 || !isboxcircle(u))
 		return;
 	d = w < h ? w : h;
-	/* At 1px retain positive radii, never feed a singular CTM to Cairo. */
+	/* At 1px retain positive radii, never feed a singular CTM to vector. */
 	t = d / 12.0;
 	if (t < 1.0) t = 1.0;
 	if (t > d * 0.6) t = d * 0.6;
 	r = (d - t) / 2;
 	x = w / 2.0; y = h / 2.0;
-	cairo_new_path(cr);
-	cairo_set_line_width(cr, t);
-	cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
-	cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
-	cairo_set_fill_rule(cr, CAIRO_FILL_RULE_WINDING);
+	vec_new_path(cr);
+	vec_set_line_width(cr, t);
+	vec_set_line_cap(cr, VEC_LINE_CAP_BUTT);
+	vec_set_line_join(cr, VEC_LINE_JOIN_ROUND);
+	vec_set_fill_rule(cr, VEC_FILL_RULE_WINDING);
 
 	if (u >= 0x1cc30 && u <= 0x1cc3f) {
 		int col = (u - 0x1cc30) % 4, row = (u - 0x1cc30) / 4;
@@ -125,35 +125,35 @@ drawboxcircle(cairo_t *cr, int w, int h, Rune u)
 		                0.22 + (u-0x1f787)*0.10 : 0.20;
 		t = d * weight;
 		r = (d-t)/2;
-		cairo_set_line_width(cr, t);
+		vec_set_line_width(cr, t);
 	}
 	rx = ry = r;
 	if (u == 0x2b2c || u == 0x2b2d) ry *= 0.55;
 	if (u == 0x2b2e || u == 0x2b2f) { rx *= 0.65; ry = (h-t)*0.425; }
 	if (u == 0x25cc) {
 		double dash[2] = { t, t*1.8 };
-		cairo_set_dash(cr, dash, 2, 0);
-		cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+		vec_set_dash(cr, dash, 2, 0);
+		vec_set_line_cap(cr, VEC_LINE_CAP_ROUND);
 	}
 	if (u >= 0x25d9 && u <= 0x25db) {
 		/* Invert the outline, not the whole disk: the annulus is left
 		 * unpainted, while its centre remains foreground (unlike U+25D8).
 		 * Never clear existing pixels or paint a guessed background. */
-		if (u == 0x25da) cairo_rectangle(cr, 0, 0, w, y);
-		else if (u == 0x25db) cairo_rectangle(cr, 0, y, w, h-y);
-		else cairo_rectangle(cr, 0, 0, w, h);
-		cairo_clip(cr);
-		cairo_rectangle(cr, 0, 0, w, h);
-		cairo_new_sub_path(cr);
+		if (u == 0x25da) vec_rectangle(cr, 0, 0, w, y);
+		else if (u == 0x25db) vec_rectangle(cr, 0, y, w, h-y);
+		else vec_rectangle(cr, 0, 0, w, h);
+		vec_clip(cr);
+		vec_rectangle(cr, 0, 0, w, h);
+		vec_new_sub_path(cr);
 		boxcirclearc(cr, x, y, r+t/2, r+t/2, 0, 4);
-		cairo_close_path(cr);
+		vec_close_path(cr);
 		if (r > t/2) {
-			cairo_new_sub_path(cr);
+			vec_new_sub_path(cr);
 			boxcirclearc(cr, x, y, r-t/2, r-t/2, 0, 4);
-			cairo_close_path(cr);
+			vec_close_path(cr);
 		}
-		cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD);
-		cairo_fill(cr);
+		vec_set_fill_rule(cr, VEC_FILL_RULE_EVEN_ODD);
+		vec_fill(cr);
 		return;
 	}
 	if (u >= 0x25dc && u <= 0x25df) {
@@ -164,22 +164,22 @@ drawboxcircle(cairo_t *cr, int w, int h, Rune u)
 	else if (u == 0x1f907) { a = 1; b = 3; }
 	if (b-a < 4) {
 		boxcirclearc(cr, x, y, rx, ry, a, b);
-		cairo_stroke(cr);
+		vec_stroke(cr);
 		return;
 	}
 	if (u >= 0x1cc6b && u <= 0x1cc6e) {
 		a = 2.5 + (u-0x1cc6b); /* omit a 90-degree cardinal wedge */
-		cairo_move_to(cr, x, y);
+		vec_move_to(cr, x, y);
 		boxcirclearc(cr, x, y, r, r, a, a+3);
-		cairo_close_path(cr);
-		cairo_fill(cr);
+		vec_close_path(cr);
+		vec_fill(cr);
 		return;
 	}
 	if (u == 0x25d6 || u == 0x25d7 || u == 0x2bca || u == 0x2bcb) {
 		a = u == 0x25d6 ? 1 : u == 0x25d7 ? -1 : u == 0x2bca ? 2 : 0;
 		boxcirclearc(cr, x, y, r, r, a, a+2);
-		cairo_close_path(cr);
-		cairo_fill(cr);
+		vec_close_path(cr);
+		vec_fill(cr);
 		return;
 	}
 	filled = u == 0x25cf || u == 0x2b24 || u == 0x2b2c ||
@@ -191,28 +191,28 @@ drawboxcircle(cairo_t *cr, int w, int h, Rune u)
 		boxcircledisk(cr, x, y, r*0.40, r*0.40, 1);
 	if (u == 0x25cd) {
 		double xx, step = t*2.5;
-		cairo_new_sub_path(cr);
+		vec_new_sub_path(cr);
 		boxcirclearc(cr, x, y, r, r, 0, 4);
-		cairo_clip(cr);
+		vec_clip(cr);
 		for (xx = x-r+step/2; xx < x+r; xx += step) {
-			cairo_move_to(cr, xx, y-r);
-			cairo_line_to(cr, xx, y+r);
+			vec_move_to(cr, xx, y-r);
+			vec_line_to(cr, xx, y+r);
 		}
-		cairo_stroke(cr);
+		vec_stroke(cr);
 	} else if (u >= 0x25d0 && u <= 0x25d5) {
 		static const double start[] = { 1, -1, 0, 2, 3, 3 };
 		static const double extent[] = { 2, 2, 2, 2, 1, 3 };
 		n = u-0x25d0;
-		cairo_move_to(cr, x, y);
+		vec_move_to(cr, x, y);
 		boxcirclearc(cr, x, y, r, r, start[n], start[n]+extent[n]);
-		cairo_close_path(cr);
-		cairo_fill(cr);
+		vec_close_path(cr);
+		vec_fill(cr);
 	} else if (u >= 0x25f4 && u <= 0x25f7) {
 		/* Two radii mark the named (unfilled) quadrant. */
 		n = u-0x25f4;
-		cairo_move_to(cr, x + ((n == 0 || n == 1) ? -r : r), y);
-		cairo_line_to(cr, x, y);
-		cairo_line_to(cr, x, y + ((n == 0 || n == 3) ? -r : r));
-		cairo_stroke(cr);
+		vec_move_to(cr, x + ((n == 0 || n == 1) ? -r : r), y);
+		vec_line_to(cr, x, y);
+		vec_line_to(cr, x, y + ((n == 0 || n == 3) ? -r : r));
+		vec_stroke(cr);
 	}
 }
